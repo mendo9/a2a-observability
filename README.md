@@ -1,343 +1,404 @@
-# A2A Observability Demo
+# A2A Server with OpenAI Agent and Phoenix Observability
 
-A comprehensive implementation of Google's Agent-to-Agent (A2A) protocol using the **official Google A2A SDK** with full observability features including OpenTelemetry, Langfuse, and Logfire.
+This project implements a Google A2A (Agent-to-Agent) server with an OpenAI agent that has weather and calculation capabilities, fully instrumented with [Phoenix](https://github.com/Arize-ai/phoenix) for comprehensive AI observability.
 
-## 🚀 Features
+## Features
 
-- **Official Google A2A SDK**: Uses the correct `a2a-sdk` package from Google
-- **OpenAI Agents Integration**: Powered by the `openai-agents` SDK
-- **Full Observability Stack**:
-  - OpenTelemetry for distributed tracing
-  - Langfuse for LLM observability
-  - Logfire for structured logging
-- **Function Tools**: Weather lookup and mathematical calculations
-- **Session Management**: Conversation tracking across interactions
-- **Error Handling**: Comprehensive error handling and logging
+- 🤖 **OpenAI Agent**: GPT-4o-mini powered agent with function calling
+- 🌤️ **Weather Tool**: Get weather information for any location
+- 🧮 **Calculator Tool**: Perform basic mathematical operations
+- 📊 **Phoenix Observability**: Complete tracing of AI interactions, tool usage, and performance metrics
+- 🔗 **A2A Protocol**: Google's Agent-to-Agent communication standard
+- 📈 **OpenTelemetry**: Industry-standard observability
 
-## 📦 Installation
+## Prerequisites
 
-### Prerequisites
-
-- Python 3.13+
+- Python 3.8+
 - OpenAI API key
-- Optional: Langfuse and Logfire accounts for observability
+- A2A SDK (contact Google for access)
+- OpenAI Agents SDK (contact OpenAI for access)
 
-### Setup
+## Installation
 
-1. **Clone and navigate to the project**:
+1. **Clone the repository**
    ```bash
    git clone <repository-url>
    cd a2a-observability
    ```
 
-2. **Install dependencies using uv (recommended)**:
-   ```bash
-   uv sync
-   ```
-
-   Or using pip:
+2. **Install dependencies**
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Set up environment variables**:
+3. **Install Phoenix**
    ```bash
-   cp env.example .env
-   # Edit .env with your API keys
+   pip install phoenix openinference-instrumentation-openai
    ```
 
-   Required variables:
-   ```bash
-   OPENAI_API_KEY=your_openai_api_key_here
-   ```
+## Configuration
 
-   Optional observability variables:
-   ```bash
-   LANGFUSE_PUBLIC_KEY=your_langfuse_public_key
-   LANGFUSE_SECRET_KEY=your_langfuse_secret_key
-   LANGFUSE_HOST=https://cloud.langfuse.com
-   LOGFIRE_TOKEN=your_logfire_token
-   OTEL_EXPORTER_OTLP_ENDPOINT=your_otlp_endpoint
-   OTEL_EXPORTER_OTLP_HEADERS=your_otlp_headers
-   ```
-
-## 🏃‍♂️ Running the Demo
-
-### Start the A2A Server
+### Required Environment Variables
 
 ```bash
-uv run python a2a_obs/a2a_server.py
+export OPENAI_API_KEY="your-openai-api-key"
 ```
+
+### Optional Environment Variables
+
+```bash
+# Phoenix configuration (defaults to local)
+export PHOENIX_COLLECTOR_ENDPOINT="http://127.0.0.1:6006/v1/traces"
+
+# Logfire (optional)
+export LOGFIRE_TOKEN="your-logfire-token"
+
+# External OTLP endpoint (optional)
+export OTEL_EXPORTER_OTLP_ENDPOINT="your-otlp-endpoint"
+export OTEL_EXPORTER_OTLP_HEADERS="your-auth-headers"
+```
+
+## Running the Server
+
+1. **Start Phoenix (if not already running)**
+   ```bash
+   python -m phoenix.server.main serve
+   ```
+   This will start Phoenix UI at http://127.0.0.1:6006
+
+2. **Start the A2A server**
+   ```bash
+   python src/server.py
+   ```
 
 The server will start on `http://localhost:8000` with the following endpoints:
-- `http://localhost:8000/.well-known/agent.json` - Agent card endpoint
-- `http://localhost:8000/agent/message` - A2A message endpoint
+- **A2A RPC**: `http://localhost:8000/` (JSON-RPC for messages)
+- **Agent Card**: `http://localhost:8000/.well-known/agent.json` (agent discovery)
+- **Phoenix UI**: `http://127.0.0.1:6006` (observability dashboard)
 
-### Run the A2A Client
+## A2A Protocol Endpoints
 
-In a separate terminal:
+The Google A2A protocol defines specific endpoint conventions:
 
-```bash
-uv run python a2a_obs/a2a_client.py
-```
+### Standard Endpoints
+| Endpoint | Purpose | Method |
+|----------|---------|---------|
+| `/` | JSON-RPC endpoint for all A2A operations | POST |
+| `/.well-known/agent.json` | Agent discovery and capabilities | GET |
+| `/agent/authenticatedExtendedCard` | Extended agent info (if auth supported) | GET |
 
-Choose between:
-1. **Interactive chat** - Chat with the agent in real-time
-2. **Automated demo** - Run predefined test scenarios
+### Why Root Path for RPC?
+- **🏛️ Protocol Standard**: A2A specification uses root `/` for JSON-RPC
+- **🔄 Single Endpoint**: All message types routed through one endpoint
+- **📡 JSON-RPC Convention**: Standard practice for JSON-RPC APIs
+- **🎯 Simplified Routing**: Agent card for discovery, root for operations
 
-## 🔧 Available Tools
+## Usage Examples
 
-The A2A agent comes with two built-in tools:
+### Weather Queries
+- "What's the weather in Tokyo?"
+- "Tell me the weather in New York"
+- "How's the weather in London?"
 
-### Weather Tool
-```python
-get_weather(location: str) -> str
-```
-Get current weather information for any location.
+### Math Calculations
+- "Calculate 15 * 7"
+- "What's 100 divided by 5?"
+- "Add 25 and 37"
 
-**Example**: "What's the weather in Tokyo?"
+## Observability Features
 
-### Calculator Tool
-```python
-calculate(operation: str, a: float, b: float) -> float
-```
-Perform basic mathematical operations (add, subtract, multiply, divide).
+### Phoenix Dashboard
+Access the Phoenix UI at http://127.0.0.1:6006 to see:
+- **Traces**: Complete execution traces of agent interactions
+- **Spans**: Individual operations (LLM calls, tool usage, etc.)
+- **Performance Metrics**: Latency, token usage, error rates
+- **Tool Usage**: Function calling patterns and results
+- **Session Tracking**: User conversation flows
 
-**Example**: "Calculate 15 * 7"
+### Traced Operations
+- ✅ OpenAI LLM calls (automatically instrumented)
+- ✅ Function tool executions
+- ✅ A2A protocol interactions
+- ✅ Error handling and exceptions
+- ✅ Session and conversation tracking
 
-## 📊 Observability Features
-
-### OpenTelemetry Tracing
-- Distributed tracing across A2A calls
-- Function tool execution tracing
-- HTTP request/response tracing
-- Custom span attributes and events
-
-### Langfuse LLM Observability
-- LLM call tracking and analysis
-- Token usage monitoring
-- Conversation flow visualization
-- Error tracking and debugging
-
-### Logfire Structured Logging
-- Structured log events
-- Performance monitoring
-- Real-time debugging
-- Integration with OpenAI Agents SDK
-
-## 🏗️ Architecture
+## Architecture
 
 ```
-┌─────────────────┐    A2A Protocol    ┌─────────────────┐
-│   A2A Client    │◄──────────────────►│   A2A Server    │
-│                 │                    │                 │
-│ • HTTP Client   │                    │ • OpenAI Agent │
-│ • Observability │                    │ • Function Tools│
-│ • Session Mgmt  │                    │ • Observability │
-└─────────────────┘                    └─────────────────┘
-         │                                       │
-         ▼                                       ▼
-┌─────────────────┐                    ┌─────────────────┐
-│  Observability  │                    │  Observability  │
-│                 │                    │                 │
-│ • OpenTelemetry │                    │ • OpenTelemetry │
-│ • Langfuse      │                    │ • Langfuse      │
-│ • HTTP Tracing  │                    │ • Logfire       │
-└─────────────────┘                    └─────────────────┘
+┌─────────────────┐    ┌──────────────┐    ┌─────────────┐
+│   A2A Client    │────▶│  A2A Server  │────▶│ OpenAI API  │
+└─────────────────┘    └──────────────┘    └─────────────┘
+                              │
+                              ▼
+                       ┌──────────────┐    ┌─────────────┐
+                       │    Tools     │    │   Phoenix   │
+                       │ • Weather    │    │   Tracing   │
+                       │ • Calculator │    │     UI      │
+                       └──────────────┘    └─────────────┘
 ```
 
-## 🔍 Key Implementation Details
+## Agent Capabilities
 
-### Correct A2A SDK Usage
+The agent supports:
+- **Streaming**: Real-time response streaming
+- **Function Calling**: Weather and calculation tools
+- **State Tracking**: Conversation history and context
+- **Error Handling**: Graceful error recovery
+- **Observability**: Complete execution tracing
 
-The implementation uses the official Google A2A SDK with the agent executor pattern:
+## Troubleshooting
 
-```python
-# Correct imports
-from a2a.types import AgentCard, AgentSkill, Message, TextPart, Role
-from a2a.server.apps.starlette_app import A2AStarletteApplication
-from a2a.server.agent_execution.agent_executor import AgentExecutor
-from a2a.client import A2AClient
-```
+### Common Issues
 
-### Agent Executor Pattern
+1. **Phoenix not connecting**
+   - Ensure Phoenix server is running on port 6006
+   - Check PHOENIX_COLLECTOR_ENDPOINT environment variable
 
-The A2A SDK uses an agent executor pattern where you implement an `AgentExecutor`:
+2. **OpenAI API errors**
+   - Verify OPENAI_API_KEY is set correctly
+   - Check API key permissions and quotas
 
-```python
-class ObservableAgentExecutor(AgentExecutor):
-    async def execute(self, context: ServerCallContext, event_queue: EventQueue) -> None:
-        # Extract message from context
-        message = context.params.get("message", {})
-        text_content = ""
-        for part in message.get("parts", []):
-            if part.get("type") == "text":
-                text_content += part.get("text", "")
-        
-        # Process with your agent
-        response = await self.agent.invoke(text_content)
-        
-        # Send response via event queue
-        from a2a.server.events.events import new_agent_text_message
-        event_queue.enqueue_event(new_agent_text_message(response))
-```
+3. **Missing dependencies**
+   - Ensure A2A SDK and OpenAI Agents SDK are properly installed
+   - Check that all requirements.txt packages are installed
 
-### Server Setup
+### Debug Mode
+Enable console span export by checking the console output when running the server. All spans will be printed to the console for debugging.
 
-The server uses a Starlette application with proper A2A routing:
-
-```python
-# Create agent card
-agent_card = AgentCard(
-    id="openai-weather-math-agent",
-    name="OpenAI Weather & Math Agent",
-    description="An AI agent with weather and calculation capabilities",
-    skills=[
-        AgentSkill(
-            id="get_weather",
-            name="Get Weather",
-            description="Get current weather for a location",
-            examples=["What's the weather in Tokyo?"],
-        ),
-    ],
-)
-
-# Create agent executor
-agent_executor = ObservableAgentExecutor()
-
-# Create request handler
-request_handler = RequestHandler(
-    agent_executor=agent_executor,
-    task_store=InMemoryTaskStore(),
-)
-
-# Create A2A application
-app = A2AStarletteApplication(
-    agent_card=agent_card,
-    request_handler=request_handler,
-)
-
-# Run with uvicorn
-config = uvicorn.Config(app=app.app, host="0.0.0.0", port=8000)
-server = uvicorn.Server(config)
-await server.serve()
-```
-
-### Client Implementation
-
-The client uses the A2A SDK client with proper message formatting:
-
-```python
-client = A2AClient(base_url="http://localhost:8000")
-
-message = Message(
-    role=Role.USER,
-    parts=[TextPart(type="text", text="Hello, world!")],
-)
-
-response = await client.send_message(message=message)
-```
-
-## 🧪 Testing
-
-### Interactive Testing
-
-1. Start the server
-2. Run the client in interactive mode
-3. Try these example queries:
-   - "What's the weather in Paris?"
-   - "Calculate 25 * 4"
-   - "What's the weather in Tokyo and calculate 100 / 5"
-
-### Automated Testing
-
-Run the automated demo to test multiple scenarios:
-
-```bash
-uv run python a2a_obs/a2a_client.py
-# Choose option 2 for automated demo
-```
-
-## 📈 Monitoring and Debugging
-
-### View Traces
-
-1. **OpenTelemetry**: Configure OTLP endpoint to view distributed traces
-2. **Langfuse**: Check your Langfuse dashboard for LLM call analysis
-3. **Logfire**: Monitor structured logs and performance metrics
-
-### Debug Issues
-
-- Check server logs for A2A protocol errors
-- Monitor OpenTelemetry spans for performance bottlenecks
-- Use Langfuse to debug LLM interactions
-- Review Logfire logs for detailed execution flow
-
-## 🔧 Customization
-
-### Adding New Tools
-
-```python
-@function_tool
-def my_custom_tool(param: str) -> str:
-    """Your custom tool description."""
-    # Implementation here
-    return result
-
-# Add to agent initialization
-self.agent = Agent(
-    model="gpt-4o-mini",
-    tools=[get_weather, calculate, my_custom_tool],
-    system_prompt="...",
-)
-```
-
-### Custom Observability
-
-```python
-# Add custom spans
-with tracer.start_as_current_span("custom_operation") as span:
-    span.set_attribute("custom_attribute", value)
-    # Your code here
-```
-
-## 🚨 Common Issues
-
-### Import Errors
-- Ensure you're using `a2a-sdk` not `a2a` or `python-a2a`
-- Check that all dependencies are installed correctly
-
-### Connection Issues
-- Verify the server is running on the correct port
-- Check firewall settings
-- Ensure environment variables are set correctly
-
-### Observability Issues
-- Verify API keys are correct
-- Check network connectivity to observability platforms
-- Review environment variable configuration
-
-## 📚 References
-
-- [Google A2A Protocol](https://github.com/google-a2a/a2a-python)
-- [Official A2A SDK](https://pypi.org/project/a2a-sdk/)
-- [OpenAI Agents SDK](https://github.com/openai/openai-agents)
-- [OpenTelemetry Python](https://opentelemetry.io/docs/languages/python/)
-- [Langfuse Documentation](https://langfuse.com/docs)
-- [Logfire Documentation](https://logfire.pydantic.dev/)
-
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+4. Add appropriate tracing for new features
+5. Test with Phoenix observability
+6. Submit a pull request
 
-## 📄 License
+## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+[Add your license here]
 
----
+## Links
 
-**Note**: This implementation uses the official Google A2A SDK and follows the correct protocol specifications. Previous implementations using incorrect imports have been fixed to ensure compatibility with the official A2A ecosystem. 
+- [Phoenix Documentation](https://docs.arize.com/phoenix)
+- [OpenTelemetry Documentation](https://opentelemetry.io/docs/)
+- [Google A2A Protocol](https://developers.google.com/agent-to-agent)
+- [OpenAI Function Calling](https://platform.openai.com/docs/guides/function-calling)
+
+## ID Strategy and Correlation
+
+### ID Types and Their Purposes
+
+The A2A client uses a strategic approach to ID generation for optimal tracing and correlation:
+
+#### 🔗 **Correlation ID** (Single UUID per exchange)
+```python
+correlation_id = str(uuid.uuid4())  # Generated once per message exchange
+
+# Used for:
+message.messageId = correlation_id      # Message content identifier
+request.id = correlation_id             # JSON-RPC request identifier
+```
+
+**Why the same ID?**
+- ✅ **Easy correlation**: Links request, message, and response
+- ✅ **Simplified tracing**: Single ID tracks entire message flow
+- ✅ **Debugging**: Easy to find related events in logs
+- ✅ **Phoenix visibility**: All related spans grouped together
+
+#### 🌐 **Session ID** (Persistent across conversation)
+```python
+self.session_id = str(uuid.uuid4())  # Generated once per client instance
+```
+
+**Purpose:**
+- Groups all messages in a conversation
+- Enables conversation-level analytics
+- Tracks user sessions across multiple exchanges
+
+### ID Usage Patterns
+
+| ID Type | Scope | When Generated | Used For |
+|---------|-------|----------------|----------|
+| **Correlation ID** | Single message exchange | Per send_message() call | Request/Response matching, Message identification |
+| **Session ID** | Entire conversation | Client initialization | Conversation grouping, Session analytics |
+
+### Example ID Flow
+
+```
+Session: abc-123-def
+├── Message Exchange 1: msg-456-ghi
+│   ├── Request ID: msg-456-ghi
+│   ├── Message ID: msg-456-ghi
+│   └── Response: linked to msg-456-ghi
+└── Message Exchange 2: msg-789-jkl
+    ├── Request ID: msg-789-jkl
+    ├── Message ID: msg-789-jkl
+    └── Response: linked to msg-789-jkl
+```
+
+### Benefits of This Approach
+
+1. **🔍 Tracing**: Phoenix can group all spans by correlation_id
+2. **📊 Analytics**: Session-level conversation metrics
+3. **🐛 Debugging**: Single ID finds entire message flow
+4. **🔗 Correlation**: Request/response/message all linked
+5. **📈 Observability**: Clear parent-child relationships
+
+## Agent Discovery
+
+The A2A client supports automatic agent discovery through multiple mechanisms:
+
+### 🔍 **Discovery Methods**
+
+#### 1. **Manual Connection** (Traditional)
+```python
+client = ObservableA2AClient("http://localhost:8000")
+```
+
+#### 2. **Automatic Discovery**
+```python
+# Discover agents on localhost
+clients = await ObservableA2AClient.discover(discovery_scope="localhost")
+
+# Discover and auto-select first agent
+client = await ObservableA2AClient.discover_and_select(auto_select=True)
+
+# Discover agents on local network
+clients = await ObservableA2AClient.discover(discovery_scope="local-network")
+```
+
+#### 3. **Filtered Discovery**
+```python
+# Find agents with specific capabilities
+agent_filter = {
+    "capabilities": ["streaming"],      # Must support streaming
+    "skills": ["weather", "calculate"], # Must have weather or calculate skills
+    "name_pattern": "openai"           # Name must contain "openai"
+}
+
+clients = await ObservableA2AClient.discover(
+    discovery_scope="localhost",
+    agent_filter=agent_filter
+)
+```
+
+### 🌐 **Discovery Scopes**
+
+| Scope | Description | Use Case |
+|-------|-------------|----------|
+| `"localhost"` | Scan common ports on localhost | Local development |
+| `"local-network"` | Scan local network subnet | LAN deployment |
+| `"registry"` | Query agent registries | Production discovery |
+| `"all"` | All of the above | Comprehensive search |
+
+### 🎯 **Discovery Process**
+
+1. **Port Scanning**: Checks common ports (8000, 8080, 3000, 5000, 9000)
+2. **Agent Card Validation**: Fetches `/.well-known/agent.json`
+3. **Capability Verification**: Validates agent card structure
+4. **Filtering**: Applies user-defined criteria
+5. **Client Creation**: Instantiates connected clients
+
+### 📡 **Well-Known Endpoint Discovery**
+
+The discovery follows the A2A standard:
+
+```http
+GET http://[host]:[port]/.well-known/agent.json
+```
+
+**Example Response:**
+```json
+{
+  "id": "openai-weather-math-agent",
+  "name": "OpenAI Weather & Math Agent",
+  "description": "An AI agent with weather and calculation capabilities",
+  "version": "1.0.0",
+  "url": "http://localhost:8000",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": true
+  },
+  "skills": [
+    {
+      "id": "get_weather",
+      "name": "Get Weather",
+      "description": "Get current weather for a location"
+    }
+  ]
+}
+```
+
+### 🔧 **Usage Examples**
+
+#### Simple Discovery
+```python
+import asyncio
+from src.client import ObservableA2AClient
+
+async def main():
+    # Auto-discover and select first agent
+    client = await ObservableA2AClient.discover_and_select(auto_select=True)
+    
+    if client:
+        response = await client.send_message("Hello!")
+        print(response)
+        await client.close()
+
+asyncio.run(main())
+```
+
+#### Advanced Discovery with Filtering
+```python
+async def find_weather_agents():
+    # Find agents with weather capabilities
+    weather_filter = {
+        "skills": ["get_weather"],
+        "capabilities": ["streaming"]
+    }
+    
+    clients = await ObservableA2AClient.discover(
+        discovery_scope="local-network",
+        agent_filter=weather_filter,
+        timeout=10.0
+    )
+    
+    for client in clients:
+        print(f"Found weather agent: {client.agent_card.name}")
+        # Test weather functionality
+        response = await client.send_message("What's the weather in Tokyo?")
+        print(response)
+        await client.close()
+```
+
+#### Interactive Discovery
+```python
+async def interactive_discovery():
+    # Let user choose from discovered agents
+    client = await ObservableA2AClient.discover_and_select(
+        discovery_scope="localhost"
+    )
+    
+    if client:
+        print(f"Connected to: {client.agent_card.name}")
+        # Interactive chat session
+        while True:
+            message = input("You: ")
+            if message.lower() == 'quit':
+                break
+            response = await client.send_message(message)
+            print(f"Agent: {response}")
+        
+        await client.close()
+```
+
+### 🚀 **Future Discovery Enhancements**
+
+- **mDNS/Bonjour**: Zero-configuration discovery
+- **DNS-SD**: DNS-based service discovery  
+- **Registry Services**: Centralized agent marketplaces
+- **Blockchain Discovery**: Decentralized agent networks
+- **P2P Discovery**: Peer-to-peer agent mesh networks
+``` 

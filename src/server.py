@@ -37,9 +37,11 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 
-# Langfuse imports
-from langfuse import Langfuse
-from langfuse.decorators import observe, langfuse_context
+# Phoenix imports
+import phoenix as px
+from openinference.instrumentation.openai import OpenAIInstrumentor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter, BatchSpanProcessor
 
 # Apply nest_asyncio for compatibility
 nest_asyncio.apply()
@@ -51,11 +53,31 @@ logger = logging.getLogger(__name__)
 
 # Configure observability
 def setup_observability():
-    """Setup OpenTelemetry and Langfuse observability"""
+    """Setup OpenTelemetry and Phoenix observability"""
+
+    # Setup Phoenix session
+    phoenix_session = px.launch_app()
 
     # Setup OpenTelemetry
     trace.set_tracer_provider(TracerProvider())
     tracer = trace.get_tracer(__name__)
+
+    # Setup Phoenix OTLP exporter
+    phoenix_endpoint = os.getenv(
+        "PHOENIX_COLLECTOR_ENDPOINT", "http://127.0.0.1:6006/v1/traces"
+    )
+    phoenix_exporter = OTLPSpanExporter(
+        endpoint=phoenix_endpoint,
+    )
+
+    # Add Phoenix span processor
+    span_processor = BatchSpanProcessor(phoenix_exporter)
+    trace.get_tracer_provider().add_span_processor(span_processor)
+
+    # Also add console exporter for debugging
+    console_exporter = ConsoleSpanExporter()
+    console_processor = SimpleSpanProcessor(console_exporter)
+    trace.get_tracer_provider().add_span_processor(console_processor)
 
     # Setup OTLP exporter (optional - for external observability platforms)
     if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
@@ -65,24 +87,20 @@ def setup_observability():
                 "Authorization": f"Bearer {os.getenv('OTEL_EXPORTER_OTLP_HEADERS', '')}"
             },
         )
-        span_processor = SimpleSpanProcessor(otlp_exporter)
-        trace.get_tracer_provider().add_span_processor(span_processor)
+        external_span_processor = SimpleSpanProcessor(otlp_exporter)
+        trace.get_tracer_provider().add_span_processor(external_span_processor)
 
-    # Setup Langfuse
-    langfuse = Langfuse(
-        public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
-        secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
-        host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"),
-    )
+    # Instrument OpenAI with Phoenix
+    OpenAIInstrumentor().instrument()
 
     # Setup Logfire for OpenAI Agents
     logfire.configure(token=os.getenv("LOGFIRE_TOKEN"), project_name="a2a-openai-demo")
 
-    return tracer, langfuse
+    return tracer, phoenix_session
 
 
 # Initialize observability
-tracer, langfuse = setup_observability()
+tracer, phoenix_session = setup_observability()
 
 
 # Weather function tool for the OpenAI agent
@@ -98,6 +116,7 @@ def get_weather(location: str) -> str:
     """
     with tracer.start_as_current_span("get_weather_tool") as span:
         span.set_attribute("location", location)
+        span.set_attribute("tool.name", "get_weather")
 
         # Simulate weather API call
         weather_data = {
@@ -111,6 +130,7 @@ def get_weather(location: str) -> str:
             location.lower(), f"Weather data not available for {location}"
         )
         span.set_attribute("weather_result", result)
+        span.set_attribute("tool.output", result)
 
         return result
 
@@ -129,7 +149,14 @@ def calculate(operation: str, a: float, b: float) -> float:
         The result of the calculation
     """
     with tracer.start_as_current_span("calculate_tool") as span:
-        span.set_attributes({"operation": operation, "operand_a": a, "operand_b": b})
+        span.set_attributes(
+            {
+                "operation": operation,
+                "operand_a": a,
+                "operand_b": b,
+                "tool.name": "calculate",
+            }
+        )
 
         operations = {
             "add": lambda x, y: x + y,
@@ -139,10 +166,13 @@ def calculate(operation: str, a: float, b: float) -> float:
         }
 
         if operation not in operations:
-            raise ValueError(f"Unknown operation: {operation}")
+            error_msg = f"Unknown operation: {operation}"
+            span.set_attribute("error", error_msg)
+            raise ValueError(error_msg)
 
         result = operations[operation](a, b)
         span.set_attribute("calculation_result", result)
+        span.set_attribute("tool.output", str(result))
 
         return result
 
@@ -155,7 +185,7 @@ class OpenAIAgentWrapper:
         self.agent = Agent(
             model="gpt-4o-mini",
             tools=[get_weather, calculate],
-            system_prompt="""You are a helpful AI assistant with access to weather and calculation tools.
+            instructions="""You are a helpful AI assistant with access to weather and calculation tools.
             
             You can:
             1. Get weather information for any location using the get_weather tool
@@ -167,7 +197,6 @@ class OpenAIAgentWrapper:
         # Initialize agent runner
         self.runner = Runner(self.agent)
 
-    @observe(name="openai_agent_invoke")
     async def invoke(self, message: str) -> str:
         """Invoke the OpenAI agent with a message"""
 
@@ -176,35 +205,24 @@ class OpenAIAgentWrapper:
                 {
                     "agent_model": "gpt-4o-mini",
                     "user_message": message[:200],
+                    "span.kind": "llm",
                 }
             )
 
-            # Create Langfuse generation for the agent call
-            langfuse_context.update_current_trace(
-                name="OpenAI Agent Execution",
-                input=message,
-                metadata={"model": "gpt-4o-mini"},
-            )
-
             try:
-                # Run the agent
+                # Run the agent - OpenAI instrumentation will automatically trace this
                 result = await self.runner.run(message)
                 agent_response = str(result)
 
                 span.set_attribute("agent_response", agent_response[:200])
-
-                # Update Langfuse with the response
-                langfuse_context.update_current_trace(output=agent_response)
+                span.set_attribute("llm.response.model", "gpt-4o-mini")
 
                 return agent_response
 
             except Exception as e:
                 span.record_exception(e)
+                span.set_attribute("error", str(e))
                 agent_response = f"I encountered an error: {str(e)}"
-
-                langfuse_context.update_current_trace(
-                    output=agent_response, metadata={"error": str(e)}
-                )
 
                 return agent_response
 
@@ -217,7 +235,6 @@ class ObservableAgentExecutor(AgentExecutor):
         self.agent = OpenAIAgentWrapper()
         self.sessions: Dict[str, List[Dict[str, Any]]] = {}
 
-    @observe(name="a2a_agent_execute")
     async def execute(
         self, context: ServerCallContext, event_queue: EventQueue
     ) -> None:
@@ -239,16 +256,9 @@ class ObservableAgentExecutor(AgentExecutor):
                     {
                         "message_text": text_content[:200],
                         "session_id": getattr(context, "session_id", "unknown"),
+                        "input.value": text_content,
+                        "session.id": getattr(context, "session_id", "unknown"),
                     }
-                )
-
-                # Log to Langfuse
-                langfuse_context.update_current_trace(
-                    name="A2A Agent Execution",
-                    input=text_content,
-                    metadata={
-                        "timestamp": datetime.now().isoformat(),
-                    },
                 )
 
                 if not text_content:
@@ -259,14 +269,16 @@ class ObservableAgentExecutor(AgentExecutor):
 
                 event_queue.enqueue_event(new_agent_text_message(response))
 
-                span.set_attribute("response_generated", True)
+                span.set_attributes(
+                    {
+                        "response_generated": True,
+                        "output.value": response[:200],
+                    }
+                )
 
             except Exception as e:
                 span.record_exception(e)
                 span.set_attribute("error", str(e))
-
-                # Log error to Langfuse
-                langfuse_context.update_current_trace(metadata={"error": str(e)})
 
                 error_response = f"I encountered an error: {str(e)}"
                 event_queue.enqueue_event(new_agent_text_message(error_response))
@@ -310,7 +322,7 @@ def create_agent_card() -> AgentCard:
 async def main():
     """Main function to run the A2A server"""
 
-    print("🚀 Starting A2A Server with OpenAI Agent and Full Observability")
+    print("🚀 Starting A2A Server with OpenAI Agent and Phoenix Observability")
     print("=" * 70)
 
     # Check required environment variables
@@ -323,16 +335,17 @@ async def main():
         return
 
     # Optional observability variables
-    observability_vars = ["LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LOGFIRE_TOKEN"]
+    observability_vars = ["PHOENIX_COLLECTOR_ENDPOINT", "LOGFIRE_TOKEN"]
     missing_obs = [var for var in observability_vars if not os.getenv(var)]
 
     if missing_obs:
         print(f"⚠️  Optional observability variables not set: {missing_obs}")
-        print("Observability features will be limited.")
+        print("Phoenix will use default local endpoint (http://127.0.0.1:6006)")
 
     print("\n📊 Observability Features:")
     print("  • OpenTelemetry: ✅ Enabled")
-    print(f"  • Langfuse: {'✅ Enabled' if not missing_obs else '⚠️  Limited'}")
+    print(f"  • Phoenix: ✅ Enabled (UI at http://127.0.0.1:6006)")
+    print(f"  • OpenAI Instrumentation: ✅ Enabled")
     print(
         f"  • Logfire: {'✅ Enabled' if os.getenv('LOGFIRE_TOKEN') else '⚠️  Disabled'}"
     )
@@ -356,12 +369,15 @@ async def main():
     )
 
     print(f"\n🌐 Server starting on http://localhost:8000")
-    print(f"📡 A2A endpoint: http://localhost:8000/agent/message")
+    print(f"📡 A2A RPC endpoint: http://localhost:8000/")
     print(f"📋 Agent card: http://localhost:8000/.well-known/agent.json")
+    print(f"📊 Phoenix UI: http://127.0.0.1:6006")
     print("\n🔧 Available tools:")
     print("  • get_weather(location) - Get weather for any location")
     print("  • calculate(operation, a, b) - Perform math calculations")
     print("\n💡 Try asking: 'What's the weather in Tokyo?' or 'Calculate 15 * 7'")
+    print("\n📈 All OpenAI calls, tool usage, and agent interactions will be")
+    print("   automatically traced and visible in Phoenix at http://127.0.0.1:6006")
     print("\nPress Ctrl+C to stop the server")
 
     try:
