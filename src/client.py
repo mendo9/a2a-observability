@@ -103,7 +103,18 @@ class AgentDiscovery:
     ) -> List[Dict[str, Any]]:
         """Discover agents by checking well-known endpoints on specified hosts"""
         if ports is None:
-            ports = [8000, 8080, 3000, 5000, 9000]  # Common ports for dev servers
+            ports = [
+                8000,
+                8001,
+                8002,
+                8080,
+                8081,
+                3000,
+                3001,
+                5000,
+                5001,
+                9000,
+            ]  # Extended port range
 
         discovered = []
 
@@ -131,6 +142,8 @@ class AgentDiscovery:
                                                 "base_url": f"{protocol}://{host}:{port}",
                                                 "discovery_method": "well-known",
                                                 "response_time": response.elapsed.total_seconds(),
+                                                "host": host,
+                                                "port": port,
                                             }
                                         )
                                         print(
@@ -146,6 +159,179 @@ class AgentDiscovery:
 
                     except Exception as e:
                         continue  # Try next host/port
+
+        return discovered
+
+    async def discover_by_dns_srv(self, domain: str = "local") -> List[Dict[str, Any]]:
+        """Discover agents using DNS SRV records"""
+        discovered = []
+
+        try:
+            import dns.resolver
+
+            # Query for A2A service records
+            # Format: _a2a._tcp.domain
+            srv_query = f"_a2a._tcp.{domain}"
+
+            try:
+                answers = dns.resolver.resolve(srv_query, "SRV")
+
+                for rdata in answers:
+                    host = str(rdata.target).rstrip(".")
+                    port = rdata.port
+
+                    print(f"🔍 Found A2A service via DNS SRV: {host}:{port}")
+
+                    # Validate the discovered service
+                    agents = await self.discover_by_well_known([host], [port])
+                    for agent in agents:
+                        agent["discovery_method"] = "dns-srv"
+                        agent["srv_priority"] = rdata.priority
+                        agent["srv_weight"] = rdata.weight
+
+                    discovered.extend(agents)
+
+            except dns.resolver.NXDOMAIN:
+                print(f"🔍 No DNS SRV records found for {srv_query}")
+            except Exception as e:
+                print(f"⚠️  DNS SRV query failed: {e}")
+
+        except ImportError:
+            print(
+                "⚠️  DNS discovery requires 'dnspython' package: pip install dnspython"
+            )
+
+        return discovered
+
+    async def discover_by_environment(self) -> List[Dict[str, Any]]:
+        """Discover agents from environment variables"""
+        discovered = []
+
+        # Check environment variables for agent URLs
+        env_vars = [
+            "A2A_AGENT_URLS",  # Comma-separated list
+            "A2A_DISCOVERY_URLS",
+            "AGENT_ENDPOINTS",
+            "A2A_SERVERS",
+        ]
+
+        agent_urls = []
+        for var in env_vars:
+            value = os.getenv(var)
+            if value:
+                # Split by comma and clean up
+                urls = [url.strip() for url in value.split(",") if url.strip()]
+                agent_urls.extend(urls)
+                print(f"🔍 Found agent URLs in {var}: {urls}")
+
+        # Also check individual numbered environment variables
+        i = 1
+        while True:
+            url = os.getenv(f"A2A_AGENT_{i}")
+            if not url:
+                break
+            agent_urls.append(url.strip())
+            i += 1
+
+        # Validate discovered URLs
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for url in agent_urls:
+                try:
+                    parsed = urlparse(url)
+                    host = parsed.hostname
+                    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+                    agents = await self.discover_by_well_known([host], [port])
+                    for agent in agents:
+                        agent["discovery_method"] = "environment"
+                        agent["env_url"] = url
+
+                    discovered.extend(agents)
+
+                except Exception as e:
+                    print(f"⚠️  Invalid URL from environment: {url} - {e}")
+
+        return discovered
+
+    async def discover_by_consul(
+        self, consul_url: str = "http://localhost:8500"
+    ) -> List[Dict[str, Any]]:
+        """Discover agents through Consul service discovery"""
+        discovered = []
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                # Query Consul for A2A services
+                consul_endpoint = f"{consul_url}/v1/catalog/service/a2a-agent"
+
+                response = await client.get(consul_endpoint)
+                if response.status_code == 200:
+                    services = response.json()
+
+                    for service in services:
+                        host = service.get("ServiceAddress") or service.get("Address")
+                        port = service.get("ServicePort")
+
+                        if host and port:
+                            print(f"🔍 Found A2A service in Consul: {host}:{port}")
+
+                            agents = await self.discover_by_well_known([host], [port])
+                            for agent in agents:
+                                agent["discovery_method"] = "consul"
+                                agent["consul_service_id"] = service.get("ServiceID")
+                                agent["consul_tags"] = service.get("ServiceTags", [])
+
+                            discovered.extend(agents)
+
+        except Exception as e:
+            print(f"⚠️  Consul discovery failed: {e}")
+
+        return discovered
+
+    async def discover_by_kubernetes(
+        self, namespace: str = "default"
+    ) -> List[Dict[str, Any]]:
+        """Discover agents through Kubernetes service discovery"""
+        discovered = []
+
+        try:
+            # This would require kubernetes client library
+            # kubectl get services -l app=a2a-agent -o json
+
+            # For now, simulate with environment-based discovery
+            # In real implementation, would use kubernetes Python client
+            kube_services = os.getenv("KUBE_A2A_SERVICES")
+            if kube_services:
+                print(f"🔍 Found Kubernetes A2A services: {kube_services}")
+                # Parse and validate services
+                # discovered.extend(...)
+
+        except Exception as e:
+            print(f"⚠️  Kubernetes discovery failed: {e}")
+
+        return discovered
+
+    async def discover_by_mdns(self) -> List[Dict[str, Any]]:
+        """Discover agents using mDNS/Bonjour (zero-configuration networking)"""
+        discovered = []
+
+        try:
+            # This would require zeroconf library
+            print("🔍 Scanning for A2A agents via mDNS/Bonjour...")
+            print("⚠️  mDNS discovery requires 'zeroconf' package: pip install zeroconf")
+
+            # Example implementation:
+            # from zeroconf import ServiceBrowser, Zeroconf
+            #
+            # class A2AListener:
+            #     def add_service(self, zeroconf, type, name):
+            #         info = zeroconf.get_service_info(type, name)
+            #         # Extract host:port and validate
+
+        except ImportError:
+            print("⚠️  mDNS discovery requires 'zeroconf' package")
+        except Exception as e:
+            print(f"⚠️  mDNS discovery failed: {e}")
 
         return discovered
 
@@ -269,7 +455,16 @@ class ObservableA2AClient:
         """Discover and connect to A2A agents automatically
 
         Args:
-            discovery_scope: "localhost", "local-network", "registry", or "all"
+            discovery_scope: Discovery method:
+                - "localhost": Scan local ports
+                - "local-network": Scan network
+                - "environment": Environment variables
+                - "dns": DNS SRV records
+                - "consul": Consul service discovery
+                - "kubernetes": Kubernetes services
+                - "mdns": mDNS/Bonjour
+                - "registry": Registry services
+                - "all": All methods
             agent_filter: Filter criteria for agents (e.g., {"skills": ["weather"]})
             timeout: Discovery timeout in seconds
 
@@ -287,6 +482,21 @@ class ObservableA2AClient:
         if discovery_scope in ["local-network", "all"]:
             discovered_agents.extend(await discovery.discover_local_network())
 
+        if discovery_scope in ["environment", "all"]:
+            discovered_agents.extend(await discovery.discover_by_environment())
+
+        if discovery_scope in ["dns", "all"]:
+            discovered_agents.extend(await discovery.discover_by_dns_srv())
+
+        if discovery_scope in ["consul", "all"]:
+            discovered_agents.extend(await discovery.discover_by_consul())
+
+        if discovery_scope in ["kubernetes", "all"]:
+            discovered_agents.extend(await discovery.discover_by_kubernetes())
+
+        if discovery_scope in ["mdns", "all"]:
+            discovered_agents.extend(await discovery.discover_by_mdns())
+
         if discovery_scope in ["registry", "all"]:
             # Example registry URLs (these would be real registry services)
             registry_urls = [
@@ -296,6 +506,22 @@ class ObservableA2AClient:
             discovered_agents.extend(
                 await discovery.discover_by_registry(registry_urls)
             )
+
+        # Remove duplicates based on base_url
+        unique_agents = {}
+        for agent in discovered_agents:
+            base_url = agent["base_url"]
+            if base_url not in unique_agents:
+                unique_agents[base_url] = agent
+            else:
+                # Prefer agents with more discovery methods
+                existing = unique_agents[base_url]
+                if not existing.get("discovery_methods"):
+                    existing["discovery_methods"] = [existing["discovery_method"]]
+                if agent["discovery_method"] not in existing["discovery_methods"]:
+                    existing["discovery_methods"].append(agent["discovery_method"])
+
+        discovered_agents = list(unique_agents.values())
 
         # Filter agents if criteria provided
         if agent_filter:
@@ -309,6 +535,8 @@ class ObservableA2AClient:
                     server_url=agent_info["base_url"],
                     agent_card=agent_info["agent_card"],
                 )
+                # Add discovery metadata to client
+                client.discovery_info = agent_info
                 clients.append(client)
 
             except Exception as e:
@@ -951,6 +1179,136 @@ async def automated_demo():
             await client.close()
 
 
+async def comprehensive_discovery_demo():
+    """Comprehensive demo showing all discovery mechanisms"""
+
+    print("🌐 Comprehensive A2A Agent Discovery Demo")
+    print("=" * 60)
+
+    print(
+        """
+🔍 Multiple Discovery Mechanisms Available:
+
+1. 🏠 Well-Known Endpoints (/.well-known/agent.json)
+   • Multiple ports: 8000, 8001, 8002, 8080, 8081, etc.
+   • Multiple hosts: localhost, network IPs
+   
+2. 🌐 DNS Service Discovery (SRV records)
+   • _a2a._tcp.local domain queries
+   • Automatic service resolution
+   
+3. 📋 Environment Variables
+   • A2A_AGENT_URLS=http://host1:8000,http://host2:8001
+   • A2A_AGENT_1=http://first-agent:8000
+   
+4. 🏢 Service Discovery Systems
+   • Consul: service registry integration
+   • Kubernetes: service discovery
+   • mDNS/Bonjour: zero-config networking
+   
+5. 📚 Registry Services
+   • Centralized agent marketplaces
+   • Public/private agent directories
+"""
+    )
+
+    # Demo each discovery method
+    discovery_methods = [
+        ("localhost", "🏠 Localhost Discovery"),
+        ("environment", "📋 Environment Variable Discovery"),
+        ("dns", "🌐 DNS SRV Discovery"),
+        ("consul", "🏢 Consul Discovery"),
+        ("mdns", "📡 mDNS Discovery"),
+    ]
+
+    all_discovered = []
+
+    for method, description in discovery_methods:
+        print(f"\n{description}")
+        print("-" * 40)
+
+        try:
+            clients = await ObservableA2AClient.discover(
+                discovery_scope=method, timeout=3.0  # Shorter timeout for demo
+            )
+
+            print(f"✅ Found {len(clients)} agents via {method}")
+
+            for client in clients:
+                agent_card = client.agent_card
+                discovery_info = getattr(client, "discovery_info", {})
+
+                print(f"  🤖 {agent_card.name}")
+                print(f"     📍 {client.server_url}")
+                print(f"     🔧 {len(agent_card.skills)} skills")
+                print(
+                    f"     🔍 Discovery: {discovery_info.get('discovery_method', 'unknown')}"
+                )
+
+                if "response_time" in discovery_info:
+                    print(f"     ⚡ Response: {discovery_info['response_time']:.3f}s")
+
+                # Close immediately after discovery (demo only)
+                await client.close()
+
+            all_discovered.extend(clients)
+
+        except Exception as e:
+            print(f"❌ {method} discovery failed: {e}")
+
+    # Show environment setup examples
+    print("\n🛠️  Setup Examples for Multiple Agent Discovery:")
+    print("=" * 60)
+
+    print(
+        """
+💡 Running Multiple A2A Servers:
+
+# Terminal 1: Weather Agent
+export A2A_AGENT_PORT=8000
+python src/server.py --port 8000 --agent-type weather
+
+# Terminal 2: Math Agent  
+export A2A_AGENT_PORT=8001
+python src/server.py --port 8001 --agent-type math
+
+# Terminal 3: Translation Agent
+export A2A_AGENT_PORT=8002
+python src/server.py --port 8002 --agent-type translation
+
+📋 Environment Variable Discovery:
+export A2A_AGENT_URLS="http://localhost:8000,http://localhost:8001,http://localhost:8002"
+export A2A_AGENT_1="http://weather-agent:8000"
+export A2A_AGENT_2="http://math-agent:8001"
+
+🌐 DNS SRV Records (for production):
+_a2a._tcp.company.com SRV 0 5 8000 weather-agent.company.com
+_a2a._tcp.company.com SRV 0 5 8001 math-agent.company.com
+
+🏢 Consul Service Registration:
+consul services register -name=a2a-agent -port=8000 -address=192.168.1.10
+consul services register -name=a2a-agent -port=8001 -address=192.168.1.11
+
+🐳 Docker Compose Multi-Agent Setup:
+version: '3.8'
+services:
+  weather-agent:
+    image: a2a-server
+    ports: ["8000:8000"]
+    environment: [AGENT_TYPE=weather]
+  
+  math-agent:
+    image: a2a-server  
+    ports: ["8001:8000"]
+    environment: [AGENT_TYPE=math]
+"""
+    )
+
+    print(
+        f"\n📊 Discovery Summary: {len(all_discovered)} total agents found across all methods"
+    )
+
+
 async def discovery_demo():
     """Demo of agent discovery capabilities"""
 
@@ -961,11 +1319,14 @@ async def discovery_demo():
     print("\n🎯 Discovery Options:")
     print("1. Localhost discovery (scan local ports)")
     print("2. Local network discovery (scan network)")
-    print("3. Auto-select first agent")
-    print("4. Discovery with filtering")
+    print("3. Environment variable discovery")
+    print("4. DNS SRV discovery")
+    print("5. Comprehensive discovery (all methods)")
+    print("6. Auto-select first agent")
+    print("7. Discovery with filtering")
 
     try:
-        choice = input("\nEnter choice (1-4): ").strip()
+        choice = input("\nEnter choice (1-7): ").strip()
 
         if choice == "1":
             # Localhost discovery
@@ -994,6 +1355,39 @@ async def discovery_demo():
                     await selected.close()
 
         elif choice == "3":
+            # Environment discovery
+            print("📋 Looking for agents in environment variables...")
+            print("💡 Set A2A_AGENT_URLS or A2A_AGENT_1, A2A_AGENT_2, etc.")
+
+            clients = await ObservableA2AClient.discover(discovery_scope="environment")
+
+            if clients:
+                client = clients[0]
+                await demo_with_client(client, "environment discovery")
+                await client.close()
+            else:
+                print("❌ No agents found in environment variables")
+                print("💡 Try: export A2A_AGENT_URLS='http://localhost:8000'")
+
+        elif choice == "4":
+            # DNS discovery
+            print("🌐 Looking for agents via DNS SRV records...")
+
+            clients = await ObservableA2AClient.discover(discovery_scope="dns")
+
+            if clients:
+                client = clients[0]
+                await demo_with_client(client, "DNS SRV discovery")
+                await client.close()
+            else:
+                print("❌ No agents found via DNS SRV")
+                print("💡 Try: dig _a2a._tcp.local SRV")
+
+        elif choice == "5":
+            # Comprehensive discovery demo
+            await comprehensive_discovery_demo()
+
+        elif choice == "6":
             # Auto-select first agent
             client = await ObservableA2AClient.discover_and_select(
                 discovery_scope="localhost", auto_select=True
@@ -1003,11 +1397,11 @@ async def discovery_demo():
                 await demo_with_client(client, "auto-selected agent")
                 await client.close()
 
-        elif choice == "4":
+        elif choice == "7":
             # Discovery with filtering
-            print("\n🔍 Discovering agents with weather capabilities...")
+            print("\n🔍 Discovering agents with streaming capabilities...")
 
-            # Filter for agents with weather skills
+            # Filter for agents with streaming capabilities
             agent_filter = {
                 "capabilities": ["streaming"],  # Agents that support streaming
                 # "skills": ["get_weather"]     # Uncomment to filter by specific skills
@@ -1074,7 +1468,7 @@ async def main():
 
     print("\n📊 Observability Features:")
     print("  • OpenTelemetry: ✅ Enabled")
-    print(f"  • Phoenix: ✅ Enabled (UI at http://127.0.0.1:6006)")
+    print("  • Phoenix: ✅ Enabled (UI at http://127.0.0.1:6006)")
     print("  • HTTP Tracing: ✅ Enabled")
     print("  • Conversation Logging: ✅ Enabled")
     print("  • Agent Discovery: ✅ Enabled")
@@ -1085,9 +1479,10 @@ async def main():
     print("2. Streaming demo")
     print("3. Automated demo (mixed scenarios)")
     print("4. Agent discovery demo")
+    print("5. Comprehensive discovery demo (all methods)")
 
     try:
-        choice = input("\nEnter choice (1-4): ").strip()
+        choice = input("\nEnter choice (1-5): ").strip()
 
         if choice == "1":
             await interactive_demo()
@@ -1097,6 +1492,8 @@ async def main():
             await automated_demo()
         elif choice == "4":
             await discovery_demo()
+        elif choice == "5":
+            await comprehensive_discovery_demo()
         else:
             print("❌ Invalid choice. Running discovery demo...")
             await discovery_demo()

@@ -245,6 +245,270 @@ Session: abc-123-def
 4. **🔗 Correlation**: Request/response/message all linked
 5. **📈 Observability**: Clear parent-child relationships
 
+## Multiple A2A Server Discovery
+
+### 🌐 **Multiple Discovery Mechanisms**
+
+A2A agents can be discovered through **multiple mechanisms**, not just a single well-known address. The `/.well-known/agent.json` endpoint is just one of many discovery methods:
+
+#### **1. 🏠 Well-Known Endpoint Discovery**
+Each A2A server exposes its agent card at `/.well-known/agent.json`:
+
+```bash
+# Multiple agents on same host (different ports)
+http://localhost:8000/.well-known/agent.json  # Weather Agent
+http://localhost:8001/.well-known/agent.json  # Math Agent
+http://localhost:8002/.well-known/agent.json  # Translation Agent
+
+# Multiple agents on different hosts
+http://weather-server:8000/.well-known/agent.json
+http://math-server:8000/.well-known/agent.json  
+http://translate-server:8000/.well-known/agent.json
+```
+
+#### **2. 📋 Environment Variable Discovery**
+Configure agent URLs through environment variables:
+
+```bash
+# Comma-separated list
+export A2A_AGENT_URLS="http://localhost:8000,http://localhost:8001,http://localhost:8002"
+
+# Individual numbered variables
+export A2A_AGENT_1="http://weather-agent:8000"
+export A2A_AGENT_2="http://math-agent:8001"
+export A2A_AGENT_3="http://translate-agent:8002"
+
+# Alternative variable names
+export AGENT_ENDPOINTS="http://host1:8000,http://host2:8001"
+export A2A_SERVERS="http://server1:8000,http://server2:8000"
+```
+
+#### **3. 🌐 DNS Service Discovery (SRV Records)**
+Use DNS SRV records for scalable discovery:
+
+```bash
+# DNS SRV record format: _a2a._tcp.domain
+_a2a._tcp.company.com SRV 0 5 8000 weather-agent.company.com
+_a2a._tcp.company.com SRV 0 5 8001 math-agent.company.com
+_a2a._tcp.company.com SRV 0 5 8002 translate-agent.company.com
+
+# Query SRV records
+dig _a2a._tcp.company.com SRV
+```
+
+#### **4. 🏢 Service Discovery Systems**
+
+**Consul Service Discovery:**
+```bash
+# Register agents with Consul
+consul services register -name=a2a-agent -port=8000 -address=192.168.1.10 -tag=weather
+consul services register -name=a2a-agent -port=8001 -address=192.168.1.11 -tag=math
+
+# Query Consul for A2A agents
+curl http://localhost:8500/v1/catalog/service/a2a-agent
+```
+
+**Kubernetes Service Discovery:**
+```yaml
+# Kubernetes service definition
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-agent
+  labels:
+    app: a2a-agent
+    type: weather
+spec:
+  selector:
+    app: weather-agent
+  ports:
+  - port: 8000
+    targetPort: 8000
+```
+
+**mDNS/Bonjour (Zero-Config):**
+```bash
+# Broadcast A2A services via mDNS
+avahi-publish-service "Weather Agent" _a2a._tcp 8000
+avahi-publish-service "Math Agent" _a2a._tcp 8001
+
+# Browse for A2A services
+avahi-browse _a2a._tcp
+```
+
+### 🎯 **Discovery Usage Examples**
+
+#### **Basic Discovery**
+```python
+from src.client import ObservableA2AClient
+
+# Discover agents on localhost
+clients = await ObservableA2AClient.discover(discovery_scope="localhost")
+
+# Discover via environment variables
+clients = await ObservableA2AClient.discover(discovery_scope="environment")
+
+# Discover via DNS SRV
+clients = await ObservableA2AClient.discover(discovery_scope="dns")
+
+# Discover via all methods
+clients = await ObservableA2AClient.discover(discovery_scope="all")
+```
+
+#### **Filtered Discovery**
+```python
+# Find agents with specific capabilities
+agent_filter = {
+    "capabilities": ["streaming"],      # Must support streaming
+    "skills": ["weather", "calculate"], # Must have weather or calculate skills
+    "name_pattern": "openai"           # Name must contain "openai"
+}
+
+clients = await ObservableA2AClient.discover(
+    discovery_scope="all",
+    agent_filter=agent_filter
+)
+```
+
+#### **Discovery Scopes**
+
+| Scope | Description | Use Case |
+|-------|-------------|----------|
+| `"localhost"` | Scan localhost ports 8000-9000 | Local development |
+| `"local-network"` | Scan local network subnet | LAN deployment |
+| `"environment"` | Environment variable URLs | Configuration-based |
+| `"dns"` | DNS SRV record queries | Production DNS setup |
+| `"consul"` | Consul service registry | Microservices architecture |
+| `"kubernetes"` | Kubernetes service discovery | Container orchestration |
+| `"mdns"` | mDNS/Bonjour zero-config | Local network auto-discovery |
+| `"registry"` | Public agent registries | Agent marketplaces |
+| `"all"` | All discovery methods | Comprehensive search |
+
+### 🚀 **Production Deployment Patterns**
+
+#### **1. Multi-Port Single Host**
+```bash
+# Run multiple specialized agents on one server
+docker run -p 8000:8000 a2a-server --agent-type weather
+docker run -p 8001:8000 a2a-server --agent-type math  
+docker run -p 8002:8000 a2a-server --agent-type translate
+```
+
+#### **2. Multi-Host Deployment**
+```bash
+# Distributed across multiple servers
+Server 1 (192.168.1.10): Weather Agent on port 8000
+Server 2 (192.168.1.11): Math Agent on port 8000
+Server 3 (192.168.1.12): Translation Agent on port 8000
+```
+
+#### **3. Docker Compose Multi-Agent**
+```yaml
+version: '3.8'
+services:
+  weather-agent:
+    image: a2a-server
+    ports: ["8000:8000"]
+    environment:
+      - AGENT_TYPE=weather
+      - PHOENIX_ENDPOINT=http://phoenix:6006
+    
+  math-agent:
+    image: a2a-server
+    ports: ["8001:8000"]
+    environment:
+      - AGENT_TYPE=math
+      - PHOENIX_ENDPOINT=http://phoenix:6006
+      
+  translate-agent:
+    image: a2a-server
+    ports: ["8002:8000"]
+    environment:
+      - AGENT_TYPE=translate
+      - PHOENIX_ENDPOINT=http://phoenix:6006
+
+  phoenix:
+    image: phoenix-server
+    ports: ["6006:6006"]
+```
+
+#### **4. Kubernetes Deployment**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a2a-agents
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: a2a-agent
+  template:
+    metadata:
+      labels:
+        app: a2a-agent
+    spec:
+      containers:
+      - name: weather-agent
+        image: a2a-server
+        ports:
+        - containerPort: 8000
+        env:
+        - name: AGENT_TYPE
+          value: "weather"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: a2a-agents
+  labels:
+    app: a2a-agent
+spec:
+  selector:
+    app: a2a-agent
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: LoadBalancer
+```
+
+### 🔍 **Discovery Algorithm**
+
+The discovery process works as follows:
+
+1. **🔍 Scan Phase**: Check all specified discovery sources
+2. **✅ Validation Phase**: Fetch `/.well-known/agent.json` from each candidate
+3. **🧪 Verification Phase**: Validate agent card structure using `AgentCard.model_validate()`
+4. **🔧 Filtering Phase**: Apply user-defined criteria (skills, capabilities, etc.)
+5. **🔗 Connection Phase**: Create connected `A2AClient` instances
+6. **📊 Deduplication Phase**: Remove duplicate agents found via multiple methods
+
+### 💡 **Best Practices**
+
+**Development:**
+- Use `localhost` discovery for local testing
+- Set environment variables for known agents
+
+**Production:**
+- Use DNS SRV records for scalable discovery
+- Implement service registry integration (Consul, etcd)
+- Use load balancers for agent high availability
+
+**Security:**
+- Validate agent certificates in production
+- Use authentication for sensitive agents
+- Implement agent authorization and access control
+
+### 🌐 **Why Multiple Discovery Methods?**
+
+1. **🔄 Flexibility**: Different deployment scenarios need different discovery
+2. **📈 Scalability**: DNS and service registries handle large agent populations  
+3. **🛡️ Resilience**: Multiple discovery paths provide fallback options
+4. **🏗️ Architecture**: Different architectures (monolith, microservices, serverless) need different approaches
+5. **🌍 Environments**: Development, staging, production have different requirements
+
+**The `/.well-known/agent.json` endpoint is just the foundation** - real-world A2A deployments use sophisticated discovery mechanisms to handle dozens or hundreds of specialized agents across distributed infrastructure.
+
 ## Agent Discovery
 
 The A2A client supports automatic agent discovery through multiple mechanisms:

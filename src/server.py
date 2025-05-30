@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 import logging
+import re
+import random
 
 import nest_asyncio
 import logfire
@@ -177,6 +179,55 @@ def calculate(operation: str, a: float, b: float) -> float:
         return result
 
 
+# Random testing tool
+@function_tool
+async def random_testing_tool(test_url: str) -> str:
+    """Random validation tool for testing session state transitions.
+
+    Args:
+        test_url: A URL to validate (for testing purposes)
+
+    Returns:
+        Random success or failure result for testing session flow
+    """
+    with tracer.start_as_current_span("random_testing_tool") as span:
+        span.set_attribute("test_url", test_url)
+        span.set_attribute("tool.name", "random_testing_tool")
+
+        # Basic URL format validation (just for testing)
+        url_pattern = r"https?://[^\s]+"
+        if not re.match(url_pattern, test_url):
+            error_msg = f"Invalid URL format: {test_url}"
+            span.set_attribute("error", error_msg)
+            return error_msg
+
+        span.set_attributes({"validation_type": "random_testing", "test_mode": True})
+
+        # Random validation logic for testing
+        # 70% chance of success, 30% chance of failure
+        is_valid = random.choice(
+            [True, True, True, False, True, True, True, False, True, True]
+        )
+
+        if is_valid:
+            # Simulate different success messages
+            sample_results = [
+                "Resource validation successful",
+                "Connection test passed",
+                "Endpoint is accessible",
+                "Service is responding correctly",
+                "Test validation completed successfully",
+            ]
+
+            result = f"✅ Validation successful: {random.choice(sample_results)}"
+            span.set_attributes({"validation_success": True, "random_result": True})
+            return result
+        else:
+            result = f"❌ Validation failed: Unable to validate {test_url}"
+            span.set_attributes({"validation_success": False, "random_result": False})
+            return result
+
+
 class OpenAIAgentWrapper:
     """Wrapper for OpenAI agent to work with A2A framework"""
 
@@ -184,12 +235,13 @@ class OpenAIAgentWrapper:
         # Initialize OpenAI Agent with tools
         self.agent = Agent(
             model="gpt-4o-mini",
-            tools=[get_weather, calculate],
-            instructions="""You are a helpful AI assistant with access to weather and calculation tools.
+            tools=[get_weather, calculate, random_testing_tool],
+            instructions="""You are a helpful AI assistant with access to weather, calculation, and random testing tools.
             
             You can:
             1. Get weather information for any location using the get_weather tool
             2. Perform basic math calculations using the calculate tool
+            3. Validate random testing URLs using the random_testing_tool
             
             Always be helpful and provide clear, accurate responses.""",
         )
@@ -233,15 +285,57 @@ class ObservableAgentExecutor(AgentExecutor):
     def __init__(self):
         super().__init__()
         self.agent = OpenAIAgentWrapper()
-        self.sessions: Dict[str, List[Dict[str, Any]]] = {}
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+
+    def get_session_id(self, context: ServerCallContext) -> str:
+        """Extract or generate session ID from context"""
+        # Try to get session ID from context attributes
+        session_id = getattr(context, "session_id", None)
+        if not session_id:
+            # Generate a new session ID based on context info
+            session_id = f"session_{uuid.uuid4().hex[:8]}"
+        return session_id
+
+    def initialize_session(self, session_id: str, context: ServerCallContext) -> None:
+        """Initialize a new session with default state"""
+        self.sessions[session_id] = {
+            "state": "init",  # init, waiting_for_url, running
+            "context_id": getattr(context, "context_id", None),
+            "task_id": getattr(context, "task_id", None),
+            "created_at": datetime.utcnow().isoformat(),
+            "test_url": None,
+            "url_validated": False,
+            "message_history": [],
+        }
+
+    def update_session_state(self, session_id: str, new_state: str, **kwargs) -> None:
+        """Update session state and additional data"""
+        if session_id in self.sessions:
+            self.sessions[session_id]["state"] = new_state
+            self.sessions[session_id]["updated_at"] = datetime.utcnow().isoformat()
+            for key, value in kwargs.items():
+                self.sessions[session_id][key] = value
+
+    def is_valid_url(self, text: str) -> bool:
+        """Check if the text contains a valid URL"""
+        url_pattern = r"https?://[^\s]+"
+        return bool(re.search(url_pattern, text))
 
     async def execute(
         self, context: ServerCallContext, event_queue: EventQueue
     ) -> None:
-        """Execute the agent with full observability"""
+        """Execute the agent with full observability and session management"""
 
         with tracer.start_as_current_span("a2a_agent_execute") as span:
             try:
+                # Get session ID and initialize if needed
+                session_id = self.get_session_id(context)
+
+                if session_id not in self.sessions:
+                    self.initialize_session(session_id, context)
+
+                session = self.sessions[session_id]
+
                 # Extract message from context
                 message_params = context.params
                 message = message_params.get("message", {})
@@ -255,17 +349,90 @@ class ObservableAgentExecutor(AgentExecutor):
                 span.set_attributes(
                     {
                         "message_text": text_content[:200],
-                        "session_id": getattr(context, "session_id", "unknown"),
+                        "session_id": session_id,
+                        "session_state": session["state"],
                         "input.value": text_content,
-                        "session.id": getattr(context, "session_id", "unknown"),
+                        "session.id": session_id,
                     }
                 )
 
-                if not text_content:
-                    text_content = "Hello! How can I help you today?"
+                # Add message to history
+                session["message_history"].append(
+                    {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "type": "user",
+                        "content": text_content,
+                    }
+                )
 
-                # Invoke the OpenAI agent
-                response = await self.agent.invoke(text_content)
+                response = ""
+
+                # Handle different session states
+                if session["state"] == "init":
+                    # Initial state - ask for URL
+                    response = """👋 Hello! I'm your AI assistant with access to weather, calculation, and random testing tools.
+
+To get started, please provide a random testing URL that you'd like me to validate.
+
+Example: https://example.com/test
+
+Once I validate the URL, I'll be able to help you with weather information, calculations, and other tasks!"""
+
+                    self.update_session_state(session_id, "waiting_for_url")
+
+                elif session["state"] == "waiting_for_url":
+                    # Waiting for URL
+                    if self.is_valid_url(text_content):
+                        # Validate the URL
+                        validation_result = await random_testing_tool(text_content)
+
+                        if "✅ Validation successful" in validation_result:
+                            # URL is valid, update session to running state
+                            self.update_session_state(
+                                session_id,
+                                "running",
+                                test_url=text_content,
+                                url_validated=True,
+                            )
+
+                            response = f"""{validation_result}
+
+🎉 Great! I've validated your URL. Now I'm ready to help you with:
+- Weather information for any location
+- Mathematical calculations  
+- Any other questions you might have
+
+What would you like to know?"""
+                        else:
+                            # URL validation failed
+                            response = f"""{validation_result}
+
+Please provide a valid URL. Make sure the format is:
+https://example.com/test
+
+And that the URL exists and is accessible."""
+                    else:
+                        response = """I need a valid URL to proceed. Please provide a URL in this format:
+
+https://example.com/test
+
+For example: https://example.com/test"""
+
+                elif session["state"] == "running":
+                    # URL validated, now use the OpenAI agent normally
+                    url_context = f"Working with URL: {session['test_url']}\n\n"
+                    full_message = url_context + text_content
+
+                    response = await self.agent.invoke(full_message)
+
+                # Add response to history
+                session["message_history"].append(
+                    {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "type": "assistant",
+                        "content": response,
+                    }
+                )
 
                 event_queue.enqueue_event(new_agent_text_message(response))
 
@@ -273,6 +440,7 @@ class ObservableAgentExecutor(AgentExecutor):
                     {
                         "response_generated": True,
                         "output.value": response[:200],
+                        "final_session_state": session["state"],
                     }
                 )
 
@@ -288,9 +456,9 @@ def create_agent_card() -> AgentCard:
     """Create the agent card with capabilities and skills"""
 
     return AgentCard(
-        id="openai-weather-math-agent",
-        name="OpenAI Weather & Math Agent",
-        description="An AI agent powered by OpenAI with weather and calculation capabilities",
+        id="openai-weather-math-random-testing-agent",
+        name="OpenAI Weather, Math & Random Testing Agent",
+        description="An AI agent powered by OpenAI with weather, calculation, and random testing capabilities",
         version="1.0.0",
         url="http://localhost:8000",
         capabilities=AgentCapabilities(
@@ -301,6 +469,13 @@ def create_agent_card() -> AgentCard:
         defaultInputModes=["text"],
         defaultOutputModes=["text"],
         skills=[
+            AgentSkill(
+                id="random_testing",
+                name="Random Testing",
+                description="Validate random testing URLs and check if URLs exist",
+                examples=["https://example.com/test"],
+                tags=["random_testing", "validation", "url"],
+            ),
             AgentSkill(
                 id="get_weather",
                 name="Get Weather",
@@ -373,11 +548,19 @@ async def main():
     print(f"📋 Agent card: http://localhost:8000/.well-known/agent.json")
     print(f"📊 Phoenix UI: http://127.0.0.1:6006")
     print("\n🔧 Available tools:")
+    print("  • random_testing(url) - Validate random testing URLs")
     print("  • get_weather(location) - Get weather for any location")
     print("  • calculate(operation, a, b) - Perform math calculations")
-    print("\n💡 Try asking: 'What's the weather in Tokyo?' or 'Calculate 15 * 7'")
-    print("\n📈 All OpenAI calls, tool usage, and agent interactions will be")
-    print("   automatically traced and visible in Phoenix at http://127.0.0.1:6006")
+    print("\n📋 Session Flow:")
+    print("  1️⃣  Initial state: Asks for URL")
+    print("  2️⃣  Validation: Checks if URL exists")
+    print("  3️⃣  Running: Full agent capabilities unlocked")
+    print("\n💡 Example URLs to try:")
+    print("  • https://example.com/test")
+    print("\n📈 All interactions, OpenAI calls, and tool usage")
+    print(
+        "   will be automatically traced and visible in Phoenix at http://127.0.0.1:6006"
+    )
     print("\nPress Ctrl+C to stop the server")
 
     try:
