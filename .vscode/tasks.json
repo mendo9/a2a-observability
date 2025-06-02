@@ -1,0 +1,64 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Start Debug Services",
+            "type": "shell",
+            "command": "docker",
+            "args": ["compose", "up", "-d", "--build"],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": [],
+            "dependsOn": "Stop All Services"
+        },
+        {
+            "label": "Stop All Services",
+            "type": "shell",
+            "command": "docker",
+            "args": ["compose", "down"],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "View Service Logs",
+            "type": "shell",
+            "command": "docker",
+            "args": ["compose", "logs", "-f"],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Rebuild Debug Images",
+            "type": "shell",
+            "command": "docker",
+            "args": ["compose", "build", "--no-cache"],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ]
+} 
