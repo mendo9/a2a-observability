@@ -18,6 +18,12 @@ dependencies = [
     "pydantic-ai[logfire]>=0.0.14",
     "langfuse>=2.56.0",
     "nest-asyncio>=1.6.0",
+    "phoenix>=0.9.1",
+    "openinference-instrumentation-openai>=0.1.30",
+    "logfire>=3.16.1",
+    "python-dotenv>=1.1.0",
+    "arize-phoenix>=10.5.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.33.1",
 ]
 
 [build-system]
@@ -25,4 +31,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["a2a_obs"]
+packages = ["src"]
