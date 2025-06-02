@@ -59,7 +59,7 @@ try:
     LOGFIRE_AVAILABLE = True
 except ImportError:
     LOGFIRE_AVAILABLE = False
-    print("⚠️  Logfire not available - some tracing features disabled")
+    print("⚠️  Logfire not available - some tracing features disabled.")
     print("💡 Install with: uv add logfire")
 
 
@@ -72,7 +72,7 @@ nest_asyncio.apply()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "qwen/qwen3-4b"
+MODEL_NAME = "qwen3-4b"
 
 
 # Configure observability
@@ -175,7 +175,7 @@ def setup_observability():
     if LOGFIRE_AVAILABLE and os.getenv("LOGFIRE_TOKEN"):
         try:
             logfire.configure(
-                token=os.getenv("LOGFIRE_TOKEN"), project_name="a2a-openai-demo"
+                token=os.getenv("LOGFIRE_TOKEN"), service_name="a2a-openai-demo"
             )
             print("✅ Logfire configured successfully...")
         except Exception as e:
@@ -184,7 +184,7 @@ def setup_observability():
     # Summary of observability status
     if PHOENIX_AVAILABLE and phoenix_connected:
         print("📊 Phoenix observability: ✅ Connected")
-        print(f"📊 Phoenix UI: http://127.0.0.1:6006")
+        print("📊 Phoenix UI: http://127.0.0.1:6006")
     else:
         print("📊 Phoenix observability: ❌ Not Available")
 
@@ -350,17 +350,17 @@ Always start your response with either "VALIDATION_SUCCESS:" or "VALIDATION_FAIL
     async def invoke(self, message: str) -> tuple[str, bool]:
         """Invoke the validation agent and return (response, is_validated)"""
 
-        with tracer.start_as_current_span("url_validation_agent_execution") as span:
-            span.set_attributes(
-                {
-                    "agent_model": MODEL_NAME,
-                    "user_message": message[:200],
-                    "span.kind": "llm",
-                    "agent_type": "url_validation",
-                }
-            )
+        try:
+            with tracer.start_as_current_span("url_validation_agent_execution") as span:
+                span.set_attributes(
+                    {
+                        "agent_model": MODEL_NAME,
+                        "user_message": message[:200],
+                        "span.kind": "llm",
+                        "agent_type": "url_validation",
+                    }
+                )
 
-            try:
                 # Run the validation agent
                 result = await Runner.run(
                     self.agent, message, run_config=self.runConfig
@@ -379,12 +379,11 @@ Always start your response with either "VALIDATION_SUCCESS:" or "VALIDATION_FAIL
                 )
 
                 return agent_response, is_validated
-
-            except Exception as e:
-                span.record_exception(e)
-                span.set_attribute("error", str(e))
-                agent_response = f"I encountered an error during validation: {str(e)}"
-                return agent_response, False
+        except Exception as e:
+            # span.record_exception(e)
+            # span.set_attribute("error", str(e))
+            agent_response = f"I encountered an error during validation: {str(e)}"
+            return agent_response, False
 
 
 class OpenAIAgentWrapper:
@@ -524,8 +523,8 @@ class ObservableAgentExecutor(AgentExecutor):
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Execute the agent with full observability and session management"""
 
-        with tracer.start_as_current_span("a2a_agent_execute") as span:
-            try:
+        try:
+            with tracer.start_as_current_span("a2a_agent_execute") as span:
                 # Get session ID and initialize if needed
                 session_id = self.get_session_id(context)
 
@@ -605,14 +604,14 @@ class ObservableAgentExecutor(AgentExecutor):
                     }
                 )
 
-            except Exception as e:
-                span.record_exception(e)
-                span.set_attribute("error", str(e))
-                print(f"🔍 DEBUG: Exception in execute: {e}")
-                print(f"🔍 DEBUG: Exception type: {type(e)}")
+        except Exception as e:
+            # span.set_attribute("error", str(e))
+            # span.record_exception(e)
+            print(f"🔍 DEBUG: Exception in execute: {e}")
+            print(f"🔍 DEBUG: Exception type: {type(e)}")
 
-                error_response = f"I encountered an error: {str(e)}"
-                event_queue.enqueue_event(new_agent_text_message(error_response))
+            error_response = f"I encountered an error: {str(e)}"
+            event_queue.enqueue_event(new_agent_text_message(error_response))
 
 
 def create_app():
