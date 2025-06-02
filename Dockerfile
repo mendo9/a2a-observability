@@ -30,12 +30,21 @@ EXPOSE 8000 5678
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/.well-known/agent.json || exit 1
 
-# Create development startup script with debug capability but no wait
+# Create development startup script with debug capability and auto-reload
 RUN echo '#!/bin/bash\n\
 echo "🚀 Starting A2A Server with Phoenix observability and debug capability..."\n\
-echo "🔧 Debug server available on 0.0.0.0:5678 (attach anytime)"\n\
 echo "📊 Phoenix UI: http://localhost:6006"\n\
-uv run python -Xfrozen_modules=off -m debugpy --listen 0.0.0.0:5678 src/server.py\n\
+if [ "${ENABLE_DEBUG:-false}" = "true" ]; then\n\
+  echo "🐛 Debug + Auto-reload mode enabled"\n\
+  echo "🔧 Debug server available on 0.0.0.0:5678 (debugpy)"\n\
+  echo "🔄 Auto-reload enabled - server will restart on file changes"\n\
+  echo "💡 Both debugging and hot-reload are active"\n\
+  uv run python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m uvicorn --factory src.server:create_app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/src\n\
+else\n\
+  echo "⚡ Fast reload mode - starting directly (no debugpy)"\n\
+  echo "🔄 Auto-reload enabled - server will restart on file changes"\n\
+  uv run uvicorn --factory src.server:create_app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/src\n\
+fi\n\
 ' > /app/dev_start.sh && chmod +x /app/dev_start.sh
 
 # Run the server in development mode

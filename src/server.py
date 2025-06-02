@@ -37,16 +37,15 @@ from agents.models.multi_provider import MultiProvider
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor, ConsoleSpanExporter
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from dotenv import load_dotenv
 
 
 # Optional observability imports
 try:
-    import phoenix as px
     from openinference.instrumentation.openai import OpenAIInstrumentor
-    from opentelemetry.sdk.trace.export import ConsoleSpanExporter, BatchSpanProcessor
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
     PHOENIX_AVAILABLE = True
 except ImportError:
@@ -73,7 +72,7 @@ nest_asyncio.apply()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "gemma-3-4b-it"
+MODEL_NAME = "qwen/qwen3-4b"
 
 
 # Configure observability
@@ -166,7 +165,7 @@ def setup_observability():
                     "Authorization": f"Bearer {os.getenv('OTEL_EXPORTER_OTLP_HEADERS', '')}"
                 },
             )
-            external_span_processor = SimpleSpanProcessor(otlp_exporter)
+            external_span_processor = BatchSpanProcessor(otlp_exporter)
             trace.get_tracer_provider().add_span_processor(external_span_processor)
             print("✅ External OTLP exporter configured")
         except Exception as e:
@@ -178,7 +177,7 @@ def setup_observability():
             logfire.configure(
                 token=os.getenv("LOGFIRE_TOKEN"), project_name="a2a-openai-demo"
             )
-            print("✅ Logfire configured successfully")
+            print("✅ Logfire configured successfully...")
         except Exception as e:
             print(f"⚠️  Logfire setup failed: {e}")
 
@@ -616,11 +615,37 @@ class ObservableAgentExecutor(AgentExecutor):
                 event_queue.enqueue_event(new_agent_text_message(error_response))
 
 
+def create_app():
+    """Factory function to create the A2A application for uvicorn"""
+
+    # Setup observability
+    setup_observability()
+
+    # Create agent card
+    agent_card = create_agent_card()
+
+    # Create agent executor
+    agent_executor = ObservableAgentExecutor()
+
+    # Create request handler
+    request_handler = DefaultRequestHandler(
+        agent_executor=agent_executor,
+        task_store=InMemoryTaskStore(),
+    )
+
+    # Create A2A application
+    app = A2AStarletteApplication(
+        agent_card=agent_card,
+        http_handler=request_handler,
+    )
+
+    return app.build()
+
+
 def create_agent_card() -> AgentCard:
     """Create the agent card with capabilities and skills"""
 
     return AgentCard(
-        id="openai-validation-weather-math-agent",
         name="OpenAI URL Validation & Assistant Agent",
         description="A multi-agent AI system with URL validation and assistant capabilities",
         version="1.0.0",
@@ -662,7 +687,7 @@ def create_agent_card() -> AgentCard:
 
 
 async def main():
-    """Main function to run the A2A server"""
+    """Main function to run the A2A server (for direct execution)"""
 
     print("🚀 Starting A2A Server with Multi-Agent System and Phoenix Observability")
     print("=" * 70)
@@ -675,52 +700,6 @@ async def main():
         print(f"❌ Missing required environment variables: {missing_vars}")
         print("Please set these variables and try again.")
         return
-
-    # Optional observability variables
-    observability_vars = ["PHOENIX_COLLECTOR_ENDPOINT", "LOGFIRE_TOKEN"]
-    missing_obs = [var for var in observability_vars if not os.getenv(var)]
-
-    if missing_obs:
-        print(f"⚠️  Optional observability variables not set: {missing_obs}")
-        print("Phoenix will use default local endpoint (http://127.0.0.1:6006)")
-
-    print("\n📊 Observability Features:")
-    print("  • OpenTelemetry: ✅ Enabled")
-    print(
-        f"  • Phoenix: {'✅ Enabled' if PHOENIX_AVAILABLE else '⚠️  Not Available'} (UI at http://127.0.0.1:6006)"
-    )
-    print(
-        f"  • OpenAI Instrumentation: {'✅ Enabled' if PHOENIX_AVAILABLE else '⚠️  Limited'}"
-    )
-    print(
-        f"  • Logfire: {'✅ Enabled' if LOGFIRE_AVAILABLE and os.getenv('LOGFIRE_TOKEN') else '⚠️  Disabled'}"
-    )
-
-    if not PHOENIX_AVAILABLE:
-        print("\n💡 To enable full observability features:")
-        print("   pip install phoenix openinference-instrumentation-openai")
-
-    if not LOGFIRE_AVAILABLE:
-        print("\n💡 To enable Logfire:")
-        print("   pip install logfire")
-
-    # Create agent card
-    agent_card = create_agent_card()
-
-    # Create agent executor
-    agent_executor = ObservableAgentExecutor()
-
-    # Create request handler
-    request_handler = DefaultRequestHandler(
-        agent_executor=agent_executor,
-        task_store=InMemoryTaskStore(),
-    )
-
-    # Create A2A application
-    app = A2AStarletteApplication(
-        agent_card=agent_card,
-        http_handler=request_handler,
-    )
 
     print("\n🌐 Server starting on http://localhost:8000")
     print("📡 A2A RPC endpoint: http://localhost:8000/")
@@ -735,16 +714,29 @@ async def main():
     print("\n💡 Example interactions:")
     print("  • Start: 'https://example.com/test' (validation agent)")
     print("  • After validation: 'What's the weather in Tokyo?' (main agent)")
-    print("\n📈 All agent interactions, tool calls, and state transitions")
+    print("\n📈 All agent interactions, tool calls, and state transitions.")
     print(
         "   will be automatically traced and visible in Phoenix at http://127.0.0.1:6006"
     )
     print("\nPress Ctrl+C to stop the server")
 
     try:
-        # Run the server
+        # Use the factory to create the app
+        app = create_app()
+
+        # Check if running in development mode
+        is_development = os.getenv("ENVIRONMENT", "development") == "development"
+
+        # Run the server with auto-reload in development
         config = uvicorn.Config(
-            app=app.build(), host="0.0.0.0", port=8000, log_level="info"
+            app=app,
+            host="0.0.0.0",
+            port=8000,
+            log_level="info",
+            reload=is_development,  # Enable auto-reload in development
+            reload_dirs=(
+                ["/app/src"] if is_development else None
+            ),  # Watch src directory (absolute path in container)
         )
         server = uvicorn.Server(config)
         await server.serve()

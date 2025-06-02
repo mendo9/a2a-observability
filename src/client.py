@@ -30,11 +30,8 @@ from a2a.types import (
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor, BatchSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-
-# Phoenix imports
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
 # Apply nest_asyncio for compatibility
 nest_asyncio.apply()
@@ -131,7 +128,7 @@ def setup_observability():
                     "Authorization": f"Bearer {os.getenv('OTEL_EXPORTER_OTLP_HEADERS', '')}"
                 },
             )
-            external_span_processor = SimpleSpanProcessor(otlp_exporter)
+            external_span_processor = BatchSpanProcessor(otlp_exporter)
             trace.get_tracer_provider().add_span_processor(external_span_processor)
             print("✅ External OTLP exporter configured")
         except Exception as e:

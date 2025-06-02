@@ -31,6 +31,9 @@ services:
       - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
+      - OPENAI_AGENTS_TRACING_ENABLED=false
+      - ENVIRONMENT=development
+      - ENABLE_DEBUG=true  # Set to true if you need debugpy debugging
     depends_on:
       - phoenix
     networks:
