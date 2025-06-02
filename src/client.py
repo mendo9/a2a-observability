@@ -9,7 +9,6 @@ import os
 import uuid
 from typing import Dict, Any, List, Optional
 import socket
-import json
 from urllib.parse import urlparse
 
 import nest_asyncio
@@ -35,7 +34,6 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor, BatchSpanProcess
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
 # Phoenix imports
-import phoenix as px
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
 # Apply nest_asyncio for compatibility
@@ -46,45 +44,113 @@ nest_asyncio.apply()
 def setup_observability():
     """Setup OpenTelemetry and Phoenix observability for the client"""
 
-    # Setup Phoenix session
-    phoenix_session = px.launch_app()
-
     # Setup OpenTelemetry
     trace.set_tracer_provider(TracerProvider())
     tracer = trace.get_tracer(__name__)
 
-    # Setup Phoenix OTLP exporter
+    # Skip console exporter - we'll use Phoenix only
+
+    # Try to setup Phoenix OTLP exporter with robust error handling
     phoenix_endpoint = os.getenv(
         "PHOENIX_COLLECTOR_ENDPOINT", "http://127.0.0.1:6006/v1/traces"
     )
-    phoenix_exporter = OTLPSpanExporter(
-        endpoint=phoenix_endpoint,
-    )
 
-    # Add Phoenix span processor
-    span_processor = BatchSpanProcessor(phoenix_exporter)
-    trace.get_tracer_provider().add_span_processor(span_processor)
+    phoenix_available = False
 
-    # Also add console exporter for debugging
-    console_exporter = ConsoleSpanExporter()
-    console_processor = SimpleSpanProcessor(console_exporter)
-    trace.get_tracer_provider().add_span_processor(console_processor)
+    try:
+        # Test Phoenix connectivity with a quick health check
+        print(f"🔍 Testing Phoenix connectivity at {phoenix_endpoint}...")
 
-    # Setup OTLP exporter (optional)
-    if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
-        otlp_exporter = OTLPSpanExporter(
-            endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-            headers={
-                "Authorization": f"Bearer {os.getenv('OTEL_EXPORTER_OTLP_HEADERS', '')}"
-            },
+        # Import httpx only when needed to avoid dependency issues
+        import httpx
+
+        # Extract base URL for health check
+        if ":6006" in phoenix_endpoint:
+            health_url = phoenix_endpoint.replace("/v1/traces", "")
+        else:
+            health_url = phoenix_endpoint.replace("/v1/traces", "")
+
+        # Quick connectivity test with short timeout
+        with httpx.Client(timeout=1.0) as test_client:
+            try:
+                # First try the health endpoint
+                response = test_client.get(f"{health_url}/health")
+                if response.status_code == 200:
+                    phoenix_available = True
+                    print("✅ Phoenix health check passed")
+            except httpx.RequestError:
+                try:
+                    # Fallback: try just the base URL
+                    response = test_client.get(health_url)
+                    if response.status_code in [
+                        200,
+                        404,
+                    ]:  # 404 is OK, means server is running
+                        phoenix_available = True
+                        print("✅ Phoenix server responding")
+                except httpx.RequestError:
+                    phoenix_available = False
+                    print("❌ Phoenix server not reachable")
+
+        if phoenix_available:
+            # Setup Phoenix OTLP exporter
+            try:
+                phoenix_exporter = OTLPSpanExporter(endpoint=phoenix_endpoint)
+                span_processor = BatchSpanProcessor(phoenix_exporter)
+                trace.get_tracer_provider().add_span_processor(span_processor)
+                print(f"📊 Phoenix observability enabled: {phoenix_endpoint}")
+            except Exception as e:
+                print(f"⚠️  Phoenix OTLP exporter setup failed: {e}")
+                phoenix_available = False
+
+    except ImportError:
+        print("⚠️  httpx not available - cannot test Phoenix connectivity")
+        phoenix_available = False
+    except Exception as e:
+        print(f"⚠️  Phoenix connectivity test failed: {e}")
+        phoenix_available = False
+
+    # Provide helpful guidance if Phoenix is not available
+    if not phoenix_available:
+        print("📊 Running with console-only tracing")
+        print("💡 To enable Phoenix observability:")
+        print(
+            "   🐳 Docker: docker run -p 6006:6006 -p 4318:4318 arizephoenix/phoenix:latest"
         )
-        external_span_processor = SimpleSpanProcessor(otlp_exporter)
-        trace.get_tracer_provider().add_span_processor(external_span_processor)
+        print("   🚀 Compose: docker-compose up phoenix")
+        print("   🌐 Phoenix UI will be at http://localhost:6006")
 
-    # Instrument HTTPX for HTTP call tracing
-    HTTPXClientInstrumentor().instrument()
+    # Setup external OTLP exporter (optional, for other observability platforms)
+    external_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if external_endpoint:
+        try:
+            print(f"🔍 Setting up external OTLP exporter: {external_endpoint}")
+            otlp_exporter = OTLPSpanExporter(
+                endpoint=external_endpoint,
+                headers={
+                    "Authorization": f"Bearer {os.getenv('OTEL_EXPORTER_OTLP_HEADERS', '')}"
+                },
+            )
+            external_span_processor = SimpleSpanProcessor(otlp_exporter)
+            trace.get_tracer_provider().add_span_processor(external_span_processor)
+            print("✅ External OTLP exporter configured")
+        except Exception as e:
+            print(f"⚠️  External OTLP exporter setup failed: {e}")
 
-    return tracer, phoenix_session
+    # Instrument HTTPX for HTTP call tracing (if available)
+    try:
+        HTTPXClientInstrumentor().instrument()
+        print("✅ HTTPX instrumentation enabled")
+    except Exception as e:
+        print(f"⚠️  HTTPX instrumentation failed: {e}")
+
+    # Summary of observability status
+    if phoenix_available:
+        print("📊 Phoenix observability: ✅ Connected")
+    else:
+        print("📊 Phoenix observability: ❌ Not Available")
+
+    return tracer, None  # No local phoenix session
 
 
 # Initialize observability
@@ -689,7 +755,7 @@ class ObservableA2AClient:
                 # Create A2A message
                 message = Message(
                     messageId=correlation_id,  # Use same ID for correlation
-                    role=Role.USER,
+                    role=Role.user,
                     parts=[TextPart(type="text", text=text)],
                 )
 
@@ -788,7 +854,7 @@ class ObservableA2AClient:
                 # Create A2A message
                 message = Message(
                     messageId=correlation_id,  # Use same ID for correlation
-                    role=Role.USER,
+                    role=Role.user,
                     parts=[TextPart(type="text", text=text)],
                 )
 

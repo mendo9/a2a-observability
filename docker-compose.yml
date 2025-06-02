@@ -1,0 +1,50 @@
+services:
+  # Phoenix Observability Server
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"  # Phoenix UI
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+    environment:
+      - PHOENIX_HOST=0.0.0.0
+      - PHOENIX_PORT=6006
+      - PHOENIX_WORKING_DIR=/phoenix-data
+    volumes:
+      - phoenix_data:/phoenix-data
+    networks:
+      - a2a-network
+
+  # A2A Server with Debugging (Default)
+  a2a-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"  # Application port
+      - "5678:5678"  # Debug port
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006/v1/traces
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - phoenix
+    networks:
+      - a2a-network
+    volumes:
+      - ./src:/app/src
+      - ./.env:/app/.env
+    stdin_open: true
+    tty: true
+
+volumes:
+  phoenix_data:
+    driver: local
+
+networks:
+  a2a-network:
+    driver: bridge 

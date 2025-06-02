@@ -7,42 +7,64 @@ that hosts an OpenAI agent with tracing for both A2A HTTP calls and OpenAI agent
 import asyncio
 import os
 import uuid
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
+from typing import Dict, Any
 import logging
 import re
 import random
 
 import nest_asyncio
-import logfire
 import uvicorn
 
 from a2a.types import (
     AgentCard,
     AgentSkill,
     AgentCapabilities,
+    Role,
 )
-from a2a.server.request_handlers.request_handler import RequestHandler
+from a2a.server.request_handlers.default_request_handler import DefaultRequestHandler
 from a2a.server.apps.starlette_app import A2AStarletteApplication
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events.event_queue import EventQueue
-from a2a.server.tasks.task_store import InMemoryTaskStore
+from a2a.server.tasks import InMemoryTaskStore
 from a2a.utils.message import new_agent_text_message
 
 # OpenAI Agents SDK
-from agents import Agent, Runner, function_tool
+from agents import Agent, RunConfig, Runner, function_tool
+from agents.models.multi_provider import MultiProvider
 
 # OpenTelemetry imports
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, ConsoleSpanExporter
 
-# Phoenix imports
-import phoenix as px
-from openinference.instrumentation.openai import OpenAIInstrumentor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter, BatchSpanProcessor
+from dotenv import load_dotenv
+
+
+# Optional observability imports
+try:
+    import phoenix as px
+    from openinference.instrumentation.openai import OpenAIInstrumentor
+    from opentelemetry.sdk.trace.export import ConsoleSpanExporter, BatchSpanProcessor
+
+    PHOENIX_AVAILABLE = True
+except ImportError:
+    PHOENIX_AVAILABLE = False
+    print("⚠️  Phoenix not available - observability features will be limited")
+    print("💡 Install with: uv add arize-phoenix openinference-instrumentation-openai")
+
+try:
+    import logfire
+
+    LOGFIRE_AVAILABLE = True
+except ImportError:
+    LOGFIRE_AVAILABLE = False
+    print("⚠️  Logfire not available - some tracing features disabled")
+    print("💡 Install with: uv add logfire")
+
+
+load_dotenv()
 
 # Apply nest_asyncio for compatibility
 nest_asyncio.apply()
@@ -51,51 +73,121 @@ nest_asyncio.apply()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+MODEL_NAME = "gemma-3-4b-it"
+
 
 # Configure observability
 def setup_observability():
     """Setup OpenTelemetry and Phoenix observability"""
 
-    # Setup Phoenix session
-    phoenix_session = px.launch_app()
-
-    # Setup OpenTelemetry
+    # Setup basic OpenTelemetry
     trace.set_tracer_provider(TracerProvider())
     tracer = trace.get_tracer(__name__)
 
-    # Setup Phoenix OTLP exporter
-    phoenix_endpoint = os.getenv(
-        "PHOENIX_COLLECTOR_ENDPOINT", "http://127.0.0.1:6006/v1/traces"
-    )
-    phoenix_exporter = OTLPSpanExporter(
-        endpoint=phoenix_endpoint,
-    )
+    phoenix_session = None
 
-    # Add Phoenix span processor
-    span_processor = BatchSpanProcessor(phoenix_exporter)
-    trace.get_tracer_provider().add_span_processor(span_processor)
+    # Skip console exporter - we'll use Phoenix only
 
-    # Also add console exporter for debugging
-    console_exporter = ConsoleSpanExporter()
-    console_processor = SimpleSpanProcessor(console_exporter)
-    trace.get_tracer_provider().add_span_processor(console_processor)
+    # Setup Phoenix if available
+    phoenix_connected = False
+    if PHOENIX_AVAILABLE:
+        phoenix_endpoint = os.getenv(
+            "PHOENIX_COLLECTOR_ENDPOINT", "http://127.0.0.1:6006/v1/traces"
+        )
+
+        try:
+            print(f"🔍 Testing Phoenix connectivity at {phoenix_endpoint}...")
+
+            # Quick connectivity test for Phoenix
+            import httpx
+
+            # Extract base URL for health check
+            if ":6006" in phoenix_endpoint:
+                health_url = phoenix_endpoint.replace("/v1/traces", "")
+            else:
+                health_url = phoenix_endpoint.replace("/v1/traces", "")
+
+            # Test connectivity with short timeout
+            with httpx.Client(timeout=1.0) as test_client:
+                try:
+                    response = test_client.get(f"{health_url}/health")
+                    if response.status_code == 200:
+                        phoenix_connected = True
+                        print("✅ Phoenix health check passed")
+                except httpx.RequestError:
+                    try:
+                        response = test_client.get(health_url)
+                        if response.status_code in [200, 404]:
+                            phoenix_connected = True
+                            print("✅ Phoenix server responding")
+                    except httpx.RequestError:
+                        phoenix_connected = False
+                        print("❌ Phoenix server not reachable")
+
+            if phoenix_connected:
+                # Setup Phoenix OTLP exporter
+                phoenix_exporter = OTLPSpanExporter(endpoint=phoenix_endpoint)
+                span_processor = BatchSpanProcessor(phoenix_exporter)
+                trace.get_tracer_provider().add_span_processor(span_processor)
+
+                # Instrument OpenAI with Phoenix
+                OpenAIInstrumentor().instrument()
+                print(f"📊 Phoenix observability enabled: {phoenix_endpoint}")
+                print("✅ OpenAI instrumentation enabled")
+            else:
+                print("📊 Phoenix not reachable - using console tracing only")
+                print("💡 To enable Phoenix observability:")
+                print(
+                    "   🐳 Docker: docker run -p 6006:6006 -p 4318:4318 arizephoenix/phoenix:latest"
+                )
+                print("   🚀 Compose: docker-compose up phoenix")
+
+        except ImportError:
+            print("⚠️  httpx not available - cannot test Phoenix connectivity")
+            phoenix_connected = False
+        except Exception as e:
+            print(f"⚠️  Phoenix setup failed: {e}")
+            print("📊 Falling back to console-only tracing")
+            phoenix_connected = False
+    else:
+        print("📊 Phoenix not available - using basic tracing")
+        print(
+            "💡 To enable Phoenix: uv add arize-phoenix openinference-instrumentation-openai"
+        )
 
     # Setup OTLP exporter (optional - for external observability platforms)
-    if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
-        otlp_exporter = OTLPSpanExporter(
-            endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-            headers={
-                "Authorization": f"Bearer {os.getenv('OTEL_EXPORTER_OTLP_HEADERS', '')}"
-            },
-        )
-        external_span_processor = SimpleSpanProcessor(otlp_exporter)
-        trace.get_tracer_provider().add_span_processor(external_span_processor)
+    external_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if external_endpoint:
+        try:
+            print(f"🔍 Setting up external OTLP exporter: {external_endpoint}")
+            otlp_exporter = OTLPSpanExporter(
+                endpoint=external_endpoint,
+                headers={
+                    "Authorization": f"Bearer {os.getenv('OTEL_EXPORTER_OTLP_HEADERS', '')}"
+                },
+            )
+            external_span_processor = SimpleSpanProcessor(otlp_exporter)
+            trace.get_tracer_provider().add_span_processor(external_span_processor)
+            print("✅ External OTLP exporter configured")
+        except Exception as e:
+            print(f"⚠️  External OTLP exporter setup failed: {e}")
 
-    # Instrument OpenAI with Phoenix
-    OpenAIInstrumentor().instrument()
+    # Setup Logfire for OpenAI Agents if available
+    if LOGFIRE_AVAILABLE and os.getenv("LOGFIRE_TOKEN"):
+        try:
+            logfire.configure(
+                token=os.getenv("LOGFIRE_TOKEN"), project_name="a2a-openai-demo"
+            )
+            print("✅ Logfire configured successfully")
+        except Exception as e:
+            print(f"⚠️  Logfire setup failed: {e}")
 
-    # Setup Logfire for OpenAI Agents
-    logfire.configure(token=os.getenv("LOGFIRE_TOKEN"), project_name="a2a-openai-demo")
+    # Summary of observability status
+    if PHOENIX_AVAILABLE and phoenix_connected:
+        print("📊 Phoenix observability: ✅ Connected")
+        print(f"📊 Phoenix UI: http://127.0.0.1:6006")
+    else:
+        print("📊 Phoenix observability: ❌ Not Available")
 
     return tracer, phoenix_session
 
@@ -211,14 +303,14 @@ async def random_testing_tool(test_url: str) -> str:
         if is_valid:
             # Simulate different success messages
             sample_results = [
-                "Resource validation successful",
-                "Connection test passed",
-                "Endpoint is accessible",
-                "Service is responding correctly",
-                "Test validation completed successfully",
+                "✅ Validation successful: Resource validation successful",
+                "✅ Validation successful: Connection test passed",
+                "✅ Validation successful: Endpoint is accessible",
+                "✅ Validation successful: Service is responding correctly",
+                "✅ Validation successful: Test validation completed successfully",
             ]
 
-            result = f"✅ Validation successful: {random.choice(sample_results)}"
+            result = random.choice(sample_results)
             span.set_attributes({"validation_success": True, "random_result": True})
             return result
         else:
@@ -233,20 +325,28 @@ class URLValidationAgentWrapper:
     def __init__(self):
         # Initialize agent with only the random testing tool
         self.agent = Agent(
-            model="gpt-4o-mini",
+            name="URL Validation Agent",
+            model=MODEL_NAME,
             tools=[random_testing_tool],
             instructions="""You are a URL validation assistant. Your job is to:
 
 1. When a user provides input, check if it contains a valid URL format (starts with http:// or https://)
 2. If it's a valid URL format, use the random_testing_tool to validate it
-3. If the validation is successful, tell the user their URL has been validated and they can now proceed
-4. If the validation fails or the input is not a URL, ask them to provide a valid URL
+3. If the validation is successful, respond with: "VALIDATION_SUCCESS: Your URL has been validated and you can now proceed."
+4. If the validation fails or the input is not a URL, respond with: "VALIDATION_FAILED: Please provide a valid URL starting with http:// or https://"
 
-Keep responses concise and helpful. Always use the random_testing_tool when you detect a valid URL format.""",
+Always start your response with either "VALIDATION_SUCCESS:" or "VALIDATION_FAILED:" for easy parsing.""",
         )
 
-        # Initialize agent runner
-        self.runner = Runner(self.agent)
+        # Initialize agent run config
+        self.runConfig = RunConfig(
+            model_provider=MultiProvider(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                openai_base_url=os.getenv("OPENAI_BASE_URL"),
+                openai_use_responses=os.getenv("USE_RESPONSES_API", "true").lower()
+                == "true",
+            )
+        )
 
     async def invoke(self, message: str) -> tuple[str, bool]:
         """Invoke the validation agent and return (response, is_validated)"""
@@ -254,7 +354,7 @@ Keep responses concise and helpful. Always use the random_testing_tool when you 
         with tracer.start_as_current_span("url_validation_agent_execution") as span:
             span.set_attributes(
                 {
-                    "agent_model": "gpt-4o-mini",
+                    "agent_model": MODEL_NAME,
                     "user_message": message[:200],
                     "span.kind": "llm",
                     "agent_type": "url_validation",
@@ -263,16 +363,18 @@ Keep responses concise and helpful. Always use the random_testing_tool when you 
 
             try:
                 # Run the validation agent
-                result = await self.runner.run(message)
+                result = await Runner.run(
+                    self.agent, message, run_config=self.runConfig
+                )
                 agent_response = str(result)
 
                 # Check if validation was successful by looking for success indicators
-                is_validated = "✅ Validation successful" in agent_response
+                is_validated = "VALIDATION_SUCCESS" in agent_response
 
                 span.set_attributes(
                     {
                         "agent_response": agent_response[:200],
-                        "llm.response.model": "gpt-4o-mini",
+                        "llm.response.model": MODEL_NAME,
                         "url_validated": is_validated,
                     }
                 )
@@ -292,7 +394,8 @@ class OpenAIAgentWrapper:
     def __init__(self):
         # Initialize OpenAI Agent with tools (excluding random_testing_tool)
         self.agent = Agent(
-            model="gpt-4o-mini",
+            name="Assistant Agent",
+            model="gemma-3-4b-it",
             tools=[get_weather, calculate],
             instructions="""You are a helpful AI assistant with access to weather and calculation tools.
             
@@ -303,8 +406,15 @@ class OpenAIAgentWrapper:
             Always be helpful and provide clear, accurate responses.""",
         )
 
-        # Initialize agent runner
-        self.runner = Runner(self.agent)
+        # Initialize agent run config
+        self.runConfig = RunConfig(
+            model_provider=MultiProvider(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                openai_base_url=os.getenv("OPENAI_BASE_URL"),
+                openai_use_responses=os.getenv("USE_RESPONSES_API", "true").lower()
+                == "true",
+            )
+        )
 
     async def invoke(self, message: str) -> str:
         """Invoke the OpenAI agent with a message"""
@@ -312,7 +422,7 @@ class OpenAIAgentWrapper:
         with tracer.start_as_current_span("openai_agent_execution") as span:
             span.set_attributes(
                 {
-                    "agent_model": "gpt-4o-mini",
+                    "agent_model": MODEL_NAME,
                     "user_message": message[:200],
                     "span.kind": "llm",
                     "agent_type": "main_agent",
@@ -321,11 +431,13 @@ class OpenAIAgentWrapper:
 
             try:
                 # Run the agent - OpenAI instrumentation will automatically trace this
-                result = await self.runner.run(message)
+                result = await Runner.run(
+                    self.agent, message, run_config=self.runConfig
+                )
                 agent_response = str(result)
 
                 span.set_attribute("agent_response", agent_response[:200])
-                span.set_attribute("llm.response.model", "gpt-4o-mini")
+                span.set_attribute("llm.response.model", MODEL_NAME)
 
                 return agent_response
 
@@ -345,6 +457,41 @@ class ObservableAgentExecutor(AgentExecutor):
         self.validation_agent = URLValidationAgentWrapper()
         self.sessions: Dict[str, Dict[str, Any]] = {}
 
+    async def cancel(self, context: RequestContext) -> None:
+        """Cancel the current agent execution
+
+        Args:
+            context: The request context to cancel
+        """
+        with tracer.start_as_current_span("a2a_agent_cancel") as span:
+            session_id = self.get_session_id(context)
+
+            span.set_attributes(
+                {
+                    "session_id": session_id,
+                    "operation": "cancel",
+                    "session_exists": session_id in self.sessions,
+                }
+            )
+
+            # Clean up session if it exists
+            if session_id in self.sessions:
+                session = self.sessions[session_id]
+                session["cancelled_at"] = datetime.now(timezone.utc).isoformat()
+                session["state"] = "cancelled"
+
+                span.set_attributes(
+                    {
+                        "previous_state": session.get("state", "unknown"),
+                        "cleanup_performed": True,
+                    }
+                )
+
+                print(f"🛑 Cancelled session {session_id}")
+            else:
+                span.set_attribute("cleanup_performed", False)
+                print(f"🛑 Attempted to cancel non-existent session {session_id}")
+
     def get_session_id(self, context: RequestContext) -> str:
         """Extract or generate session ID from context"""
         # Try to get session ID from context attributes
@@ -360,7 +507,7 @@ class ObservableAgentExecutor(AgentExecutor):
             "state": "validation",  # validation, running
             "context_id": getattr(context, "context_id", None),
             "task_id": getattr(context, "task_id", None),
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "validated_url": None,
             "message_history": [],
         }
@@ -369,7 +516,9 @@ class ObservableAgentExecutor(AgentExecutor):
         """Update session state and additional data"""
         if session_id in self.sessions:
             self.sessions[session_id]["state"] = new_state
-            self.sessions[session_id]["updated_at"] = datetime.utcnow().isoformat()
+            self.sessions[session_id]["updated_at"] = datetime.now(
+                timezone.utc
+            ).isoformat()
             for key, value in kwargs.items():
                 self.sessions[session_id][key] = value
 
@@ -406,8 +555,8 @@ class ObservableAgentExecutor(AgentExecutor):
                 # Add message to history
                 session["message_history"].append(
                     {
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "type": "user",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "type": Role.user,
                         "content": text_content,
                     }
                 )
@@ -428,7 +577,7 @@ class ObservableAgentExecutor(AgentExecutor):
                         )
 
                         # Add a note that they can now ask questions
-                        response += "\n\n🎉 Great! Now I can help you with weather information, calculations, and other questions. What would you like to know?"
+                        response += "\n\n Great! Now I can help you with weather information, calculations, and other questions. What would you like to know?"
 
                 # if running, use main agent
                 if session["state"] == "running":
@@ -441,8 +590,8 @@ class ObservableAgentExecutor(AgentExecutor):
                 # Add response to history
                 session["message_history"].append(
                     {
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "type": "assistant",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "type": Role.agent,
                         "content": response,
                     }
                 )
@@ -537,11 +686,23 @@ async def main():
 
     print("\n📊 Observability Features:")
     print("  • OpenTelemetry: ✅ Enabled")
-    print(f"  • Phoenix: ✅ Enabled (UI at http://127.0.0.1:6006)")
-    print(f"  • OpenAI Instrumentation: ✅ Enabled")
     print(
-        f"  • Logfire: {'✅ Enabled' if os.getenv('LOGFIRE_TOKEN') else '⚠️  Disabled'}"
+        f"  • Phoenix: {'✅ Enabled' if PHOENIX_AVAILABLE else '⚠️  Not Available'} (UI at http://127.0.0.1:6006)"
     )
+    print(
+        f"  • OpenAI Instrumentation: {'✅ Enabled' if PHOENIX_AVAILABLE else '⚠️  Limited'}"
+    )
+    print(
+        f"  • Logfire: {'✅ Enabled' if LOGFIRE_AVAILABLE and os.getenv('LOGFIRE_TOKEN') else '⚠️  Disabled'}"
+    )
+
+    if not PHOENIX_AVAILABLE:
+        print("\n💡 To enable full observability features:")
+        print("   pip install phoenix openinference-instrumentation-openai")
+
+    if not LOGFIRE_AVAILABLE:
+        print("\n💡 To enable Logfire:")
+        print("   pip install logfire")
 
     # Create agent card
     agent_card = create_agent_card()
@@ -550,7 +711,7 @@ async def main():
     agent_executor = ObservableAgentExecutor()
 
     # Create request handler
-    request_handler = RequestHandler(
+    request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,
         task_store=InMemoryTaskStore(),
     )
@@ -558,13 +719,13 @@ async def main():
     # Create A2A application
     app = A2AStarletteApplication(
         agent_card=agent_card,
-        request_handler=request_handler,
+        http_handler=request_handler,
     )
 
-    print(f"\n🌐 Server starting on http://localhost:8000")
-    print(f"📡 A2A RPC endpoint: http://localhost:8000/")
-    print(f"📋 Agent card: http://localhost:8000/.well-known/agent.json")
-    print(f"📊 Phoenix UI: http://127.0.0.1:6006")
+    print("\n🌐 Server starting on http://localhost:8000")
+    print("📡 A2A RPC endpoint: http://localhost:8000/")
+    print("📋 Agent card: http://localhost:8000/.well-known/agent.json")
+    print("📊 Phoenix UI: http://127.0.0.1:6006")
     print("\n🤖 Multi-Agent System:")
     print("  • URL Validation Agent - Handles URL validation with random_testing_tool")
     print("  • Main Assistant Agent - Weather & calculation tools (post-validation)")
@@ -583,7 +744,7 @@ async def main():
     try:
         # Run the server
         config = uvicorn.Config(
-            app=app.app, host="0.0.0.0", port=8000, log_level="info"
+            app=app.build(), host="0.0.0.0", port=8000, log_level="info"
         )
         server = uvicorn.Server(config)
         await server.serve()
